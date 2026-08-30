@@ -28,6 +28,9 @@ async function main() {
   const openlist = new OpenListClient(config.openlist);
   openlist.setRoot(settings.get('mediaRoot') || config.openlist.root);
   const openlistAdmin = new OpenListAdmin({ baseUrl: config.openlist.baseUrl, password: config.openlistAdminPassword });
+  if (config.openlistAdminPassword) {
+    openlist.setTokenProvider((force) => openlistAdmin.getToken(force));
+  }
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
 
