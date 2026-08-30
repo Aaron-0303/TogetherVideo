@@ -18,9 +18,29 @@ const ui = {
 };
 
 const state = {
-  nickname: '', room: '', socket: null, mediaPath: '', mediaName: '', libraryPath: '', hls: null,
-  skipPlay: 0, skipPause: 0, skipSeek: 0, skipRate: 0, lastServerState: null, syncTimer: null,
-  setup: null, loadSeq: 0, compatMode: localStorage.getItem('together_play_mode') === 'compat',
+  nickname: '',
+  room: '',
+  socket: null,
+  mediaPath: '',
+  mediaName: '',
+  mediaVersion: 0,
+  libraryPath: '',
+  librarySeq: 0,
+  hls: null,
+  lastServerState: null,
+  syncTimer: null,
+  setup: null,
+  loadSeq: 0,
+  sourceLoading: false,
+  mediaReady: false,
+  buffering: false,
+  lastHardSeekAt: 0,
+  compatMode: localStorage.getItem('together_play_mode') === 'compat',
+  expectedSeq: 0,
+  expected: { play: [], pause: [], seek: [], rate: [] },
+  rateCorrectionTimer: null,
+  rateCorrectionBase: 1,
+  rateCorrectionDirection: 0,
 };
 
 async function api(url, options = {}) {
@@ -48,14 +68,11 @@ function setSetupNotice(text = '', error = false) {
   ui.setupNotice.textContent = text;
   ui.setupNotice.classList.toggle('error-text', Boolean(error));
 }
-function skipOnce(key, ttl = 1500) {
-  state[key]++;
-  setTimeout(() => { state[key] = Math.max(0, state[key] - 1); }, ttl);
-}
 function formatBytes(bytes) {
   if (!bytes) return '';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0; let n = bytes;
+  let i = 0;
+  let n = bytes;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
   return `${n.toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
 }
@@ -64,6 +81,110 @@ function encodePath(value) { return encodeURIComponent(value || ''); }
 function roomFromUrl() { return new URLSearchParams(location.search).get('room') || ''; }
 function normalizeRoom(room) { return String(room || 'ours').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'ours'; }
 function playMode() { return state.compatMode ? 'compat' : 'original'; }
+function desiredRoomRate() { return Number(state.lastServerState?.rate || 1); }
+
+function addExpected(type, value = null, ttl = 2000) {
+  const token = { id: ++state.expectedSeq, value, timer: null };
+  state.expected[type].push(token);
+  token.timer = setTimeout(() => removeExpected(type, token), ttl);
+  return token;
+}
+
+function removeExpected(type, token) {
+  const list = state.expected[type];
+  const index = list.indexOf(token);
+  if (index >= 0) list.splice(index, 1);
+  if (token?.timer) clearTimeout(token.timer);
+}
+
+function consumeExpected(type, value = null, tolerance = 0.1) {
+  const list = state.expected[type];
+  let index = -1;
+  if (value == null) index = list.length ? 0 : -1;
+  else index = list.findIndex((token) => token.value != null && Math.abs(Number(token.value) - Number(value)) <= tolerance);
+  if (index < 0) return false;
+  const [token] = list.splice(index, 1);
+  if (token.timer) clearTimeout(token.timer);
+  return true;
+}
+
+function clearExpectedEvents() {
+  for (const type of Object.keys(state.expected)) {
+    for (const token of state.expected[type]) if (token.timer) clearTimeout(token.timer);
+    state.expected[type] = [];
+  }
+}
+
+function mediaPayload(extra = {}) {
+  return {
+    mediaPath: state.mediaPath,
+    mediaVersion: state.mediaVersion,
+    ...extra,
+  };
+}
+
+async function programmaticPlay() {
+  if (!state.mediaReady || !ui.video.paused) return true;
+  const token = addExpected('play');
+  try {
+    await ui.video.play();
+    ui.resumeOverlay.classList.add('hidden');
+    return true;
+  } catch {
+    removeExpected('play', token);
+    ui.resumeOverlay.classList.remove('hidden');
+    return false;
+  }
+}
+
+function programmaticPause() {
+  if (ui.video.paused) return;
+  addExpected('pause');
+  ui.video.pause();
+}
+
+function programmaticSeek(target) {
+  if (!state.mediaReady || ui.video.readyState < HTMLMediaElement.HAVE_METADATA) return false;
+  let value = Math.max(0, Number(target || 0));
+  if (Number.isFinite(ui.video.duration) && ui.video.duration > 0) value = Math.min(value, Math.max(0, ui.video.duration - 0.05));
+  if (Math.abs((ui.video.currentTime || 0) - value) < 0.05) return false;
+  addExpected('seek', value, 3000);
+  try {
+    ui.video.currentTime = value;
+    return true;
+  } catch {
+    consumeExpected('seek', value, 0.5);
+    return false;
+  }
+}
+
+function programmaticRate(rate) {
+  const value = Math.min(4, Math.max(0.25, Number(rate || 1)));
+  if (Math.abs(ui.video.playbackRate - value) < 0.005) return;
+  addExpected('rate', value, 1500);
+  ui.video.playbackRate = value;
+}
+
+function cancelRateCorrection(restoreRate = null) {
+  if (state.rateCorrectionTimer) clearTimeout(state.rateCorrectionTimer);
+  state.rateCorrectionTimer = null;
+  state.rateCorrectionDirection = 0;
+  if (restoreRate != null && state.mediaReady) programmaticRate(restoreRate);
+}
+
+function startRateCorrection(baseRate, direction) {
+  if (state.rateCorrectionTimer && state.rateCorrectionDirection === direction && Math.abs(state.rateCorrectionBase - baseRate) < 0.005) return;
+  cancelRateCorrection();
+  state.rateCorrectionBase = baseRate;
+  state.rateCorrectionDirection = direction;
+  const corrected = Math.min(4, Math.max(0.25, baseRate + direction * 0.04));
+  programmaticRate(corrected);
+  state.rateCorrectionTimer = setTimeout(() => {
+    state.rateCorrectionTimer = null;
+    state.rateCorrectionDirection = 0;
+    if (state.mediaReady) programmaticRate(state.rateCorrectionBase);
+  }, 2500);
+}
 
 function updatePlayModeUI() {
   if (!ui.compatModeBtn) return;
@@ -104,13 +225,17 @@ ui.logoutBtn.addEventListener('click', async () => {
   state.socket?.disconnect();
   showLogin();
 });
+
 ui.copyRoomBtn.addEventListener('click', async () => {
-  const url = new URL(location.href);
-  url.searchParams.set('room', state.room);
-  await navigator.clipboard.writeText(url.toString());
-  ui.copyRoomBtn.textContent = '已复制';
-  setTimeout(() => { ui.copyRoomBtn.textContent = '复制房间链接'; }, 1200);
+  try {
+    const url = new URL(location.href);
+    url.searchParams.set('room', state.room);
+    await navigator.clipboard.writeText(url.toString());
+    ui.copyRoomBtn.textContent = '已复制';
+    setTimeout(() => { ui.copyRoomBtn.textContent = '复制房间链接'; }, 1200);
+  } catch { setNotice('复制失败，请手动复制当前网址。'); }
 });
+
 ui.refreshLibraryBtn.addEventListener('click', () => loadLibrary(state.libraryPath));
 ui.syncNowBtn.addEventListener('click', () => state.socket?.emit('sync:request'));
 ui.compatModeBtn?.addEventListener('click', async () => {
@@ -118,10 +243,8 @@ ui.compatModeBtn?.addEventListener('click', async () => {
   localStorage.setItem('together_play_mode', state.compatMode ? 'compat' : 'original');
   updatePlayModeUI();
   if (!state.mediaPath) return;
-  const snapshot = state.lastServerState;
   setNotice(state.compatMode ? '正在为这台设备切换到兼容播放…' : '正在为这台设备恢复原画直链…');
-  await loadMedia(state.mediaPath, state.mediaName || snapshot?.mediaName);
-  if (snapshot) applyPlayback(snapshot, true);
+  await loadMedia(state.mediaPath, state.mediaName, state.mediaVersion);
 });
 
 function startApp() {
@@ -183,6 +306,7 @@ ui.startQuarkBtn.addEventListener('click', async () => {
   } catch (error) { setSetupNotice(error.message, true); }
   finally { ui.startQuarkBtn.disabled = false; }
 });
+
 ui.finishQuarkBtn.addEventListener('click', async () => {
   setSetupNotice('正在确认扫码并获取夸克授权...');
   ui.finishQuarkBtn.disabled = true;
@@ -194,6 +318,7 @@ ui.finishQuarkBtn.addEventListener('click', async () => {
   } catch (error) { setSetupNotice(error.message, true); }
   finally { ui.finishQuarkBtn.disabled = false; }
 });
+
 ui.resetQuarkBtn.addEventListener('click', async () => {
   setSetupNotice('正在重新生成二维码...');
   ui.resetQuarkBtn.disabled = true;
@@ -204,6 +329,7 @@ ui.resetQuarkBtn.addEventListener('click', async () => {
   } catch (error) { setSetupNotice(error.message, true); }
   finally { ui.resetQuarkBtn.disabled = false; }
 });
+
 ui.saveMediaRootBtn.addEventListener('click', async () => {
   const mediaRoot = ui.mediaRootInput.value.trim() || '/QuarkTV';
   setSetupNotice('正在保存片库目录...');
@@ -215,6 +341,7 @@ ui.saveMediaRootBtn.addEventListener('click', async () => {
     setSetupNotice(`片库目录已切换到 ${result.settings.mediaRoot}`);
   } catch (error) { setSetupNotice(error.message, true); }
 });
+
 ui.savePasswordBtn.addEventListener('click', async () => {
   const newPassword = ui.newSitePasswordInput.value;
   if (!newPassword) return setSetupNotice('请输入新访问密码。', true);
@@ -237,15 +364,27 @@ function connectSocket() {
       if (!result?.ok) setNotice(result?.error || '加入房间失败');
     });
   });
-  socket.on('disconnect', () => { ui.connectionBadge.textContent = '重连中'; ui.connectionBadge.classList.remove('online'); });
-  socket.on('connect_error', (error) => { ui.connectionBadge.textContent = '连接失败'; setNotice(error.message); });
-  socket.on('room:snapshot', (snapshot) => { renderMembers(snapshot.members || []); renderMessages(snapshot.messages || []); applyServerState(snapshot, true); });
+  socket.on('disconnect', () => {
+    ui.connectionBadge.textContent = '重连中';
+    ui.connectionBadge.classList.remove('online');
+  });
+  socket.on('connect_error', (error) => {
+    ui.connectionBadge.textContent = '连接失败';
+    setNotice(error.message);
+  });
+  socket.on('room:snapshot', (snapshot) => {
+    renderMembers(snapshot.members || []);
+    renderMessages(snapshot.messages || []);
+    applyServerState(snapshot, true);
+  });
   socket.on('room:members', renderMembers);
   socket.on('player:state', (snapshot) => applyServerState(snapshot, false));
   socket.on('chat:message', appendMessage);
   socket.on('reaction:show', showReaction);
   clearInterval(state.syncTimer);
-  state.syncTimer = setInterval(() => { if (socket.connected && state.mediaPath) socket.emit('sync:request'); }, 5000);
+  state.syncTimer = setInterval(() => {
+    if (socket.connected && state.mediaPath) socket.emit('sync:request');
+  }, 5000);
 }
 
 function renderMembers(members) {
@@ -260,15 +399,18 @@ function renderMembers(members) {
 }
 
 async function loadLibrary(relativePath = '') {
+  const seq = ++state.librarySeq;
   state.libraryPath = relativePath;
   ui.libraryStatus.textContent = '正在读取片库...';
   ui.libraryList.replaceChildren();
   renderBreadcrumbs(relativePath);
   try {
     const result = await api(`/api/library?path=${encodePath(relativePath)}`);
+    if (seq !== state.librarySeq) return;
     ui.libraryStatus.textContent = result.items.length ? `${result.items.length} 项` : '这里还没有可播放内容';
     for (const item of result.items) ui.libraryList.appendChild(renderLibraryItem(item));
   } catch (error) {
+    if (seq !== state.librarySeq) return;
     ui.libraryStatus.textContent = error.message;
     if (/OpenList|Quark|storage|挂载|对象/.test(error.message)) loadSetupStatus(false);
   }
@@ -277,6 +419,7 @@ async function loadLibrary(relativePath = '') {
 function renderLibraryItem(item) {
   const button = document.createElement('button');
   button.className = `library-item${item.relativePath === state.mediaPath ? ' active' : ''}`;
+  button.dataset.path = item.relativePath;
   const ext = item.isDir ? '' : item.name.split('.').pop()?.toUpperCase();
   button.innerHTML = `<span class="file-icon">${item.isDir ? '▰' : '▶'}</span><span><strong title=""></strong><small></small></span><small>${item.isDir ? '›' : ext || ''}</small>`;
   button.querySelector('strong').textContent = item.name;
@@ -303,19 +446,28 @@ function renderBreadcrumbs(relativePath) {
   });
 }
 
-function selectMedia(item) { state.socket?.emit('player:media', { mediaPath: item.relativePath, mediaName: item.name }); }
+function selectMedia(item) {
+  state.socket?.emit('player:media', { mediaPath: item.relativePath, mediaName: item.name });
+}
 
-async function loadMedia(mediaPath, mediaName) {
+async function loadMedia(mediaPath, mediaName, mediaVersion) {
   if (!mediaPath) return;
   const seq = ++state.loadSeq;
+  state.sourceLoading = true;
+  state.mediaReady = false;
+  state.buffering = false;
   state.mediaPath = mediaPath;
   state.mediaName = mediaName || mediaPath.split('/').pop();
+  state.mediaVersion = Number(mediaVersion || 0);
   ui.mediaTitle.textContent = state.mediaName;
   ui.emptyPlayer.classList.add('hidden');
+  ui.resumeOverlay.classList.add('hidden');
   setNotice(state.compatMode ? '正在获取夸克兼容播放地址…' : '正在获取夸克原画直链…');
+  cancelRateCorrection();
+  clearExpectedEvents();
+
   state.hls?.destroy();
   state.hls = null;
-  if (!ui.video.paused) skipOnce('skipPause');
   ui.video.pause();
   ui.video.removeAttribute('src');
   ui.video.load();
@@ -323,103 +475,223 @@ async function loadMedia(mediaPath, mediaName) {
   try {
     const info = await api(`/api/play-info?path=${encodePath(mediaPath)}&mode=${playMode()}`);
     if (seq !== state.loadSeq) return;
-    const ext = info.extension;
-    if (ext === '.m3u8' && window.Hls?.isSupported()) {
-      state.hls = new Hls({ enableWorker: true, lowLatencyMode: false });
-      state.hls.loadSource(info.playUrl);
-      state.hls.attachMedia(ui.video);
-      state.hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal) setNotice('HLS 播放失败。可以切换另一条播放线路后重试。');
-      });
+    const delivery = info.delivery || (info.extension === '.m3u8' ? 'hls' : 'file');
+
+    if (delivery === 'hls') {
+      if (window.Hls?.isSupported()) {
+        state.hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          backBufferLength: 60,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+        });
+        state.hls.loadSource(info.playUrl);
+        state.hls.attachMedia(ui.video);
+        state.hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (!data.fatal) return;
+          state.sourceLoading = false;
+          state.mediaReady = false;
+          setNotice('兼容流 HLS 加载失败，可能是夸克 CDN 跨域限制。请恢复“原画直链”或更换浏览器。');
+        });
+      } else if (ui.video.canPlayType('application/vnd.apple.mpegurl')) {
+        ui.video.src = info.playUrl;
+        ui.video.load();
+      } else {
+        state.sourceLoading = false;
+        setNotice('当前浏览器不支持这个兼容视频流，请恢复“原画直链”或使用 Chrome / Edge / Safari。');
+        return;
+      }
     } else {
       ui.video.src = info.playUrl;
       ui.video.load();
     }
-    if (['.mkv', '.ts'].includes(ext) && !state.compatMode) setNotice('该格式可能无法原画直播；可切换“兼容播放”。');
+
+    if (['.mkv', '.ts'].includes(info.extension) && !state.compatMode) {
+      setNotice('该格式可能无法原画播放；若黑屏可切换“兼容播放”。');
+    }
     refreshActiveLibraryItem();
-  } catch (error) { if (seq === state.loadSeq) setNotice(error.message); }
+  } catch (error) {
+    if (seq !== state.loadSeq) return;
+    state.sourceLoading = false;
+    state.mediaReady = false;
+    setNotice(error.message);
+  }
 }
 
 function refreshActiveLibraryItem() {
-  document.querySelectorAll('.library-item').forEach((el) => el.classList.remove('active'));
-  for (const el of document.querySelectorAll('.library-item strong')) {
-    if (el.textContent === ui.mediaTitle.textContent) el.closest('.library-item')?.classList.add('active');
-  }
+  document.querySelectorAll('.library-item').forEach((el) => {
+    el.classList.toggle('active', el.dataset.path === state.mediaPath);
+  });
 }
 
 function applyServerState(snapshot, initial) {
   state.lastServerState = snapshot;
-  const changedMedia = snapshot.mediaPath && snapshot.mediaPath !== state.mediaPath;
-  const load = changedMedia ? loadMedia(snapshot.mediaPath, snapshot.mediaName) : Promise.resolve();
-  load.then(() => applyPlayback(snapshot, initial)).catch((error) => setNotice(error.message));
+  const incomingVersion = Number(snapshot.mediaVersion || 0);
+  const changedMedia = snapshot.mediaPath && (
+    snapshot.mediaPath !== state.mediaPath || incomingVersion !== state.mediaVersion
+  );
+
+  if (changedMedia) {
+    loadMedia(snapshot.mediaPath, snapshot.mediaName, incomingVersion).catch((error) => setNotice(error.message));
+    return;
+  }
+  if (!snapshot.mediaPath || snapshot.mediaPath !== state.mediaPath) return;
+  if (state.sourceLoading || !state.mediaReady) return;
+  applyPlayback(snapshot, initial);
 }
 
-function applyPlayback(snapshot, initial) {
+function applyPlayback(snapshot, initial = false) {
   if (!snapshot.mediaPath || snapshot.mediaPath !== state.mediaPath) return;
-  const target = Math.max(0, Number(snapshot.position || 0));
-  const drift = Math.abs((ui.video.currentTime || 0) - target);
-  ui.driftBadge.textContent = drift < 0.35 ? '已同步' : `校准 ${drift.toFixed(1)}s`;
-  if (initial || drift > 1.1) {
-    skipOnce('skipSeek');
-    try { ui.video.currentTime = target; } catch {}
-  } else if (drift > 0.35 && snapshot.playing) {
-    const direction = ui.video.currentTime < target ? 1 : -1;
-    skipOnce('skipRate');
-    ui.video.playbackRate = Math.min(2, Math.max(0.5, Number(snapshot.rate || 1) + direction * 0.03));
-    setTimeout(() => { skipOnce('skipRate'); ui.video.playbackRate = Number(snapshot.rate || 1); }, 1800);
+  if (Number(snapshot.mediaVersion || 0) !== state.mediaVersion) return;
+  if (!state.mediaReady || state.sourceLoading || ui.video.readyState < HTMLMediaElement.HAVE_METADATA) return;
+
+  const desiredRate = Math.min(4, Math.max(0.25, Number(snapshot.rate || 1)));
+  if (state.rateCorrectionTimer && Math.abs(state.rateCorrectionBase - desiredRate) > 0.005) {
+    cancelRateCorrection(desiredRate);
+  } else if (!state.rateCorrectionTimer && Math.abs(ui.video.playbackRate - desiredRate) > 0.01) {
+    programmaticRate(desiredRate);
   }
-  const desiredRate = Number(snapshot.rate || 1);
-  if (Math.abs(ui.video.playbackRate - desiredRate) > 0.05) { skipOnce('skipRate'); ui.video.playbackRate = desiredRate; }
-  if (snapshot.playing && ui.video.paused) {
-    skipOnce('skipPlay');
-    ui.video.play().then(() => ui.resumeOverlay.classList.add('hidden')).catch(() => ui.resumeOverlay.classList.remove('hidden'));
-  } else if (!snapshot.playing && !ui.video.paused) {
-    skipOnce('skipPause');
-    ui.video.pause();
+
+  let target = Math.max(0, Number(snapshot.position || 0));
+  if (Number.isFinite(ui.video.duration) && ui.video.duration > 0) {
+    target = Math.min(target, Math.max(0, ui.video.duration - 0.05));
+  }
+  const drift = Math.abs((ui.video.currentTime || 0) - target);
+  ui.driftBadge.textContent = drift < 0.35 ? '已同步' : `偏差 ${drift.toFixed(1)}s`;
+
+  const now = Date.now();
+  const canSoftCorrect = !state.buffering && !ui.video.seeking && ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+  const canHardCorrect = !state.buffering && !ui.video.seeking && ui.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+
+  if (initial) {
+    if (drift > 0.2 && programmaticSeek(target)) state.lastHardSeekAt = now;
+  } else if (drift > 2.5 && canHardCorrect && now - state.lastHardSeekAt > 4000) {
+    cancelRateCorrection(desiredRate);
+    if (programmaticSeek(target)) state.lastHardSeekAt = now;
+  } else if (drift > 0.45 && drift <= 2.5 && snapshot.playing && canSoftCorrect) {
+    const direction = ui.video.currentTime < target ? 1 : -1;
+    startRateCorrection(desiredRate, direction);
+  } else if (drift < 0.25 && state.rateCorrectionTimer) {
+    cancelRateCorrection(desiredRate);
+  }
+
+  if (snapshot.playing) {
+    if (ui.video.paused) programmaticPlay();
+  } else {
+    cancelRateCorrection(desiredRate);
+    if (!ui.video.paused) programmaticPause();
   }
 }
 
 ui.resumeOverlay.addEventListener('click', () => {
   ui.resumeOverlay.classList.add('hidden');
-  skipOnce('skipPlay');
-  ui.video.play().catch(() => ui.resumeOverlay.classList.remove('hidden'));
-});
-ui.video.addEventListener('play', () => {
-  if (state.skipPlay > 0) return state.skipPlay--;
-  state.socket?.emit('player:play', { position: ui.video.currentTime });
-});
-ui.video.addEventListener('pause', () => {
-  if (state.skipPause > 0) return state.skipPause--;
-  if (!ui.video.ended && state.mediaPath) state.socket?.emit('player:pause', { position: ui.video.currentTime });
-});
-ui.video.addEventListener('seeked', () => {
-  if (state.skipSeek > 0) return state.skipSeek--;
-  if (state.mediaPath) state.socket?.emit('player:seek', { position: ui.video.currentTime });
-});
-ui.video.addEventListener('ratechange', () => {
-  if (state.skipRate > 0) return state.skipRate--;
-  if (state.mediaPath) state.socket?.emit('player:rate', { rate: ui.video.playbackRate });
-});
-ui.video.addEventListener('loadedmetadata', () => {
-  if (/正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
-});
-ui.video.addEventListener('canplay', () => {
-  if (/缓冲|正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
-});
-ui.video.addEventListener('waiting', () => {
-  if (state.mediaPath) setNotice(state.compatMode ? '兼容流正在缓冲…若持续卡顿可恢复“原画直链”。' : '原画正在缓冲…若本设备一直黑屏可尝试“兼容播放”。');
-});
-ui.video.addEventListener('stalled', () => {
-  if (state.mediaPath) setNotice(state.compatMode ? '兼容流网络停滞，正在等待夸克 CDN…' : '原画直链网络停滞，正在等待夸克 CDN…');
-});
-ui.video.addEventListener('error', () => {
-  if (!state.mediaPath) return;
-  setNotice(state.compatMode
-    ? '这台设备的兼容流也无法播放。请尝试恢复原画，或更换 Chrome / Edge / Safari。'
-    : '这台设备无法播放原画。MP4 也可能是 HEVC/H.265 编码；请点击“原画直链”旁的按钮切换兼容播放。');
+  programmaticPlay();
 });
 
-function renderMessages(messages) { ui.chatMessages.replaceChildren(); messages.forEach(appendMessage); }
+ui.video.addEventListener('play', () => {
+  if (state.sourceLoading || !state.mediaReady) return;
+  if (consumeExpected('play')) return;
+  state.socket?.emit('player:play', mediaPayload({ position: ui.video.currentTime }));
+});
+
+ui.video.addEventListener('pause', () => {
+  if (state.sourceLoading || !state.mediaReady) return;
+  if (consumeExpected('pause')) return;
+  if (ui.video.ended || document.hidden) return;
+  state.socket?.emit('player:pause', mediaPayload({ position: ui.video.currentTime }));
+});
+
+ui.video.addEventListener('seeked', () => {
+  if (state.sourceLoading || !state.mediaReady) return;
+  if (consumeExpected('seek', ui.video.currentTime, 0.4)) return;
+  cancelRateCorrection(desiredRoomRate());
+  state.socket?.emit('player:seek', mediaPayload({ position: ui.video.currentTime }));
+});
+
+ui.video.addEventListener('ratechange', () => {
+  if (state.sourceLoading || !state.mediaReady) return;
+  if (consumeExpected('rate', ui.video.playbackRate, 0.02)) return;
+  if (state.rateCorrectionTimer) {
+    clearTimeout(state.rateCorrectionTimer);
+    state.rateCorrectionTimer = null;
+    state.rateCorrectionDirection = 0;
+  }
+  state.socket?.emit('player:rate', mediaPayload({ rate: ui.video.playbackRate }));
+});
+
+ui.video.addEventListener('loadedmetadata', () => {
+  if (!state.mediaPath) return;
+  state.sourceLoading = false;
+  state.mediaReady = true;
+  state.buffering = false;
+  if (/正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
+  if (state.lastServerState) applyPlayback(state.lastServerState, true);
+  state.socket?.emit('sync:request');
+});
+
+ui.video.addEventListener('canplay', () => {
+  const recovered = state.buffering;
+  state.sourceLoading = false;
+  state.mediaReady = true;
+  state.buffering = false;
+  if (/缓冲|网络停滞|正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
+  if (recovered) {
+    state.socket?.emit('sync:request');
+    if (state.lastServerState) applyPlayback(state.lastServerState, false);
+  }
+});
+
+ui.video.addEventListener('playing', () => {
+  state.buffering = false;
+  if (/缓冲|网络停滞/.test(ui.playerNotice.textContent)) setNotice('');
+});
+
+ui.video.addEventListener('waiting', () => {
+  if (!state.mediaPath || state.sourceLoading) return;
+  state.buffering = true;
+  cancelRateCorrection(desiredRoomRate());
+  setNotice(state.compatMode ? '兼容流正在缓冲…不会反复跳进度，等待夸克 CDN 恢复。' : '原画正在缓冲…不会反复跳进度，等待夸克 CDN 恢复。');
+});
+
+ui.video.addEventListener('stalled', () => {
+  if (!state.mediaPath || state.sourceLoading) return;
+  state.buffering = true;
+  cancelRateCorrection(desiredRoomRate());
+  setNotice(state.compatMode ? '兼容流网络停滞，正在等待夸克 CDN…' : '原画直链网络停滞，正在等待夸克 CDN…');
+});
+
+ui.video.addEventListener('ended', () => {
+  if (!state.mediaPath || !state.mediaReady) return;
+  cancelRateCorrection();
+  const position = Number.isFinite(ui.video.duration) ? ui.video.duration : ui.video.currentTime;
+  state.socket?.emit('player:pause', mediaPayload({ position, reason: 'ended' }));
+});
+
+ui.video.addEventListener('error', () => {
+  if (!state.mediaPath) return;
+  state.sourceLoading = false;
+  state.mediaReady = false;
+  state.buffering = false;
+  cancelRateCorrection();
+  setNotice(state.compatMode
+    ? '这台设备的兼容流也无法播放。请尝试恢复原画，或更换 Chrome / Edge / Safari。'
+    : '这台设备无法播放原画。MP4 也可能是 HEVC/H.265 编码；请切换“兼容播放”。');
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    cancelRateCorrection(desiredRoomRate());
+    return;
+  }
+  if (state.socket?.connected && state.mediaPath) state.socket.emit('sync:request');
+});
+
+function renderMessages(messages) {
+  ui.chatMessages.replaceChildren();
+  messages.forEach(appendMessage);
+}
+
 function appendMessage(message) {
   const wrap = document.createElement('div');
   wrap.className = 'message';
@@ -433,13 +705,18 @@ function appendMessage(message) {
   ui.chatMessages.appendChild(wrap);
   ui.chatMessages.scrollTop = ui.chatMessages.scrollHeight;
 }
+
 ui.chatForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const text = ui.chatInput.value.trim();
   if (!text) return;
   state.socket?.emit('chat:send', { text }, (result) => { if (result?.ok) ui.chatInput.value = ''; });
 });
-document.querySelectorAll('[data-reaction]').forEach((button) => button.addEventListener('click', () => state.socket?.emit('reaction:send', { emoji: button.dataset.reaction })));
+
+document.querySelectorAll('[data-reaction]').forEach((button) => {
+  button.addEventListener('click', () => state.socket?.emit('reaction:send', { emoji: button.dataset.reaction }));
+});
+
 function showReaction(payload) {
   const el = document.createElement('div');
   el.className = 'floating-reaction';
