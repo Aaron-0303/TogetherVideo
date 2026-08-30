@@ -54,6 +54,11 @@ class OpenListAdmin {
     return this.token;
   }
 
+  async getToken(force = false) {
+    if (force) this.token = '';
+    return this.token || this.login();
+  }
+
   async request(endpoint, options = {}) {
     if (!this.token) await this.login();
     try { return await this.raw(endpoint, { ...options, auth: true }); }
