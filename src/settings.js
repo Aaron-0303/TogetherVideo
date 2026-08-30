@@ -11,6 +11,7 @@ class SettingsStore {
     this.file = file;
     this.defaults = defaults;
     this.data = null;
+    this.writeChain = Promise.resolve();
   }
 
   async init() {
@@ -27,10 +28,16 @@ class SettingsStore {
     }
   }
 
-  async save() {
+  save() {
     const tmp = `${this.file}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(this.data, null, 2));
-    await fs.rename(tmp, this.file);
+    const snapshot = JSON.stringify(this.data, null, 2);
+    this.writeChain = this.writeChain
+      .then(async () => {
+        await fs.writeFile(tmp, snapshot);
+        await fs.rename(tmp, this.file);
+      })
+      .catch((error) => console.error('[settings] save failed:', error));
+    return this.writeChain;
   }
 
   get(key) { return this.data?.[key]; }
