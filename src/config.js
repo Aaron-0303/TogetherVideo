@@ -27,7 +27,7 @@ module.exports = {
   maxRoomUsers: integer('MAX_ROOM_USERS', 2),
   dataFile: process.env.DATA_FILE || path.join(process.cwd(), 'data', 'state.json'),
   openlist: {
-    baseUrl: (process.env.OPENLIST_BASE_URL || 'http://openlist:5244').replace(/\/$/, ''),
+    baseUrl: (process.env.OPENLIST_BASE_URL || 'http://127.0.0.1:5244').replace(/\/$/, ''),
     publicUrl: (process.env.OPENLIST_PUBLIC_URL || '').replace(/\/$/, ''),
     token: process.env.OPENLIST_TOKEN || '',
     root: normalizeRoot(process.env.OPENLIST_ROOT || '/'),
