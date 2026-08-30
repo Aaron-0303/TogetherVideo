@@ -30,6 +30,12 @@ async function main() {
   const openlistAdmin = new OpenListAdmin({ baseUrl: config.openlist.baseUrl, password: config.openlistAdminPassword });
   if (config.openlistAdminPassword) {
     openlist.setTokenProvider((force) => openlistAdmin.getToken(force));
+    try {
+      const migrated = await openlistAdmin.ensureStreamingMode();
+      if (migrated?.ready) console.log(`[TogetherVideo] QuarkTV playback mode: ${migrated.playMode || 'streaming'}`);
+    } catch (error) {
+      console.warn('[TogetherVideo] unable to enable QuarkTV streaming compatibility mode:', error.message);
+    }
   }
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
