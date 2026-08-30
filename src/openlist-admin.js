@@ -15,6 +15,10 @@ function parseAddition(storage) {
   try { return JSON.parse(storage?.addition || '{}'); } catch { return {}; }
 }
 
+function isAuthError(error) {
+  return Number(error?.status) === 401 || /unauthorized|token|login|登录|未授权/i.test(String(error?.message || ''));
+}
+
 class OpenListAdmin {
   constructor({ baseUrl, password = '' }) {
     this.baseUrl = String(baseUrl || 'http://127.0.0.1:5244').replace(/\/$/, '');
@@ -38,10 +42,16 @@ class OpenListAdmin {
         signal: controller.signal,
       });
       const json = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(`OpenList HTTP ${response.status}`);
-      if (typeof json.code === 'number' && json.code !== 200) throw new Error(json.message || `OpenList code ${json.code}`);
+      if (!response.ok || (typeof json.code === 'number' && json.code !== 200)) {
+        const error = new Error(json.message || (response.ok ? `OpenList code ${json.code}` : `OpenList HTTP ${response.status}`));
+        error.status = response.status;
+        error.code = json.code;
+        throw error;
+      }
       return json.data;
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async health() {
@@ -66,8 +76,10 @@ class OpenListAdmin {
 
   async request(endpoint, options = {}) {
     if (!this.token) await this.login();
-    try { return await this.raw(endpoint, { ...options, auth: true }); }
-    catch (error) {
+    try {
+      return await this.raw(endpoint, { ...options, auth: true });
+    } catch (error) {
+      if (!isAuthError(error)) throw error;
       this.token = '';
       await this.login();
       return this.raw(endpoint, { ...options, auth: true });
