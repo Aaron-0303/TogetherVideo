@@ -82,12 +82,10 @@ async function main() {
     try { res.json({ ok: true, quark: await openlistAdmin.createQuark() }); }
     catch (error) { next(error); }
   });
-
   app.post('/api/setup/quark/finish', async (_req, res, next) => {
     try { res.json({ ok: true, quark: await openlistAdmin.finishQuark() }); }
     catch (error) { next(error); }
   });
-
   app.post('/api/setup/quark/reset', async (_req, res, next) => {
     try { res.json({ ok: true, quark: await openlistAdmin.resetQuark() }); }
     catch (error) { next(error); }
@@ -141,9 +139,24 @@ async function main() {
     } catch (error) { next(error); }
   });
 
+  const publicDir = path.join(process.cwd(), 'public');
   app.use('/vendor/hls', express.static(path.join(process.cwd(), 'node_modules', 'hls.js', 'dist'), { immutable: true, maxAge: '7d' }));
-  app.use(express.static(path.join(process.cwd(), 'public'), { maxAge: '1h' }));
-  app.get('*', (_req, res) => res.sendFile(path.join(process.cwd(), 'public', 'index.html')));
+  app.get(['/', '/index.html'], (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  app.use(express.static(publicDir, {
+    maxAge: 0,
+    etag: true,
+    setHeaders(res, filePath) {
+      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
+      else res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
+  app.get('*', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
   app.use((error, _req, res, _next) => {
     const status = error instanceof OpenListError ? error.status : 500;
     console.error('[http]', error);
