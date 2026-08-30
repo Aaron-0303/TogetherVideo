@@ -31,18 +31,23 @@ async function main() {
   if (config.openlistAdminPassword) {
     openlist.setTokenProvider((force) => openlistAdmin.getToken(force));
     try {
-      const migrated = await openlistAdmin.ensureStreamingMode();
-      if (migrated?.ready) console.log(`[TogetherVideo] QuarkTV playback mode: ${migrated.playMode || 'streaming'}`);
+      const migrated = await openlistAdmin.ensureDownloadMode();
+      if (migrated?.ready) console.log(`[TogetherVideo] QuarkTV default playback mode: ${migrated.playMode || 'download'}`);
     } catch (error) {
-      console.warn('[TogetherVideo] unable to enable QuarkTV streaming compatibility mode:', error.message);
+      console.warn('[TogetherVideo] unable to restore QuarkTV download mode:', error.message);
     }
   }
+
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
 
   const sessionMiddleware = cookieSession({
-    name: 'together_session', keys: [settings.get('sessionSecret')],
-    maxAge: 1000 * 60 * 60 * 24 * 30, sameSite: 'lax', httpOnly: true, secure: config.cookieSecure,
+    name: 'together_session',
+    keys: [settings.get('sessionSecret')],
+    maxAge: 1000 * 60 * 60 * 24 * 30,
+    sameSite: 'lax',
+    httpOnly: true,
+    secure: config.cookieSecure,
   });
 
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
@@ -54,11 +59,14 @@ async function main() {
   app.post('/api/login', (req, res) => {
     const password = String(req.body?.password || '');
     const nickname = cleanName(req.body?.nickname);
-    if (!password || !settings.verifyPassword(password, config.sitePassword)) return res.status(401).json({ ok: false, error: '密码错误' });
+    if (!password || !settings.verifyPassword(password, config.sitePassword)) {
+      return res.status(401).json({ ok: false, error: '密码错误' });
+    }
     req.session.authenticated = true;
     req.session.nickname = nickname;
     res.json({ ok: true, nickname, defaultRoom: config.defaultRoom, passwordChanged: settings.publicSettings().passwordChanged });
   });
+
   app.post('/api/logout', (req, res) => { req.session = null; res.json({ ok: true }); });
   app.get('/api/session', (req, res) => res.json({
     authenticated: Boolean(req.session?.authenticated),
@@ -91,10 +99,12 @@ async function main() {
     try { res.json({ ok: true, quark: await openlistAdmin.createQuark() }); }
     catch (error) { next(error); }
   });
+
   app.post('/api/setup/quark/finish', async (_req, res, next) => {
     try { res.json({ ok: true, quark: await openlistAdmin.finishQuark() }); }
     catch (error) { next(error); }
   });
+
   app.post('/api/setup/quark/reset', async (_req, res, next) => {
     try { res.json({ ok: true, quark: await openlistAdmin.resetQuark() }); }
     catch (error) { next(error); }
@@ -130,7 +140,11 @@ async function main() {
     try {
       const relativePath = String(req.query.path || '');
       if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
-      const playable = await openlist.resolvePlayable(relativePath);
+      const requestedMode = String(req.query.mode || 'original') === 'compat' ? 'streaming' : 'download';
+      const resolve = () => openlist.resolvePlayable(relativePath);
+      const playable = config.openlistAdminPassword
+        ? await openlistAdmin.withPlayMode(requestedMode, resolve)
+        : await resolve();
       const headerNames = Object.keys(playable.headers || {});
       if (headerNames.length) console.warn(`[play] provider headers: ${headerNames.join(', ')}`);
       res.set('Cache-Control', 'private, no-store');
@@ -138,14 +152,19 @@ async function main() {
     } catch (error) { next(error); }
   });
 
-  app.get('/api/play-info', async (req, res, next) => {
-    try {
-      const relativePath = String(req.query.path || '');
-      if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
-      const { data } = await openlist.get(relativePath);
-      const ext = path.extname(data?.name || relativePath).toLowerCase();
-      res.json({ ok: true, name: data?.name || path.posix.basename(relativePath), extension: ext, size: Number(data?.size || 0), provider: data?.provider || '', playUrl: `/api/play?path=${encodeURIComponent(relativePath)}` });
-    } catch (error) { next(error); }
+  app.get('/api/play-info', (req, res) => {
+    const relativePath = String(req.query.path || '');
+    if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
+    const mode = String(req.query.mode || 'original') === 'compat' ? 'compat' : 'original';
+    const name = path.posix.basename(relativePath);
+    const extension = path.extname(name).toLowerCase();
+    res.json({
+      ok: true,
+      name,
+      extension,
+      mode,
+      playUrl: `/api/play?path=${encodeURIComponent(relativePath)}&mode=${mode}`,
+    });
   });
 
   const publicDir = path.join(process.cwd(), 'public');
@@ -166,6 +185,7 @@ async function main() {
     res.set('Cache-Control', 'no-store');
     res.sendFile(path.join(publicDir, 'index.html'));
   });
+
   app.use((error, _req, res, _next) => {
     const status = error instanceof OpenListError ? error.status : 500;
     console.error('[http]', error);
@@ -181,8 +201,11 @@ async function main() {
   server.listen(config.port, config.host, () => {
     console.log(`[TogetherVideo] listening on ${config.host}:${config.port}`);
     console.log(`[TogetherVideo] OpenList: ${config.openlist.baseUrl}, media root: ${openlist.root}`);
-    console.log('[TogetherVideo] media mode: redirect-only; video bytes are never proxied by this app');
-    if (!settings.publicSettings().passwordChanged) console.warn('[TogetherVideo] first login password is "change-me"; change it in Settings immediately.');
+    console.log('[TogetherVideo] media mode: original download by default; compat streaming is resolved per client');
+    console.log('[TogetherVideo] video bytes are never proxied by this app');
+    if (!settings.publicSettings().passwordChanged) {
+      console.warn('[TogetherVideo] first login password is "change-me"; change it in Settings immediately.');
+    }
   });
 }
 
