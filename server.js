@@ -13,6 +13,7 @@ const { WebDavClient, WebDavError } = require('./src/webdav');
 const { WatchRoom, cleanMediaPath } = require('./src/watch-room');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.webm', '.mov', '.ogv', '.ogg', '.mkv']);
+const PLAYABLE_CACHE_TTL_MS = 10_000;
 
 function cleanName(value) {
   return String(value || '访客').trim().replace(/[<>]/g, '').slice(0, 20) || '访客';
@@ -49,6 +50,7 @@ async function main() {
   io.engine.use(sessionMiddleware);
 
   const participants = new Map();
+  const playableCache = new Map();
 
   function participantList() {
     return [...participants.entries()].map(([id, item]) => ({
@@ -59,7 +61,7 @@ async function main() {
   }
 
   function broadcastPresence() {
-    io.emit('presence:update', { participants: participantList(), limit: config.maxParticipants });
+    io.emit('presence:update', { participants: participantList(), limit: 2 });
   }
 
   function requireAuth(req, res, next) {
@@ -73,6 +75,23 @@ async function main() {
       throw new WebDavError('请先在设置中完整配置 WebDAV', 400, 'WEBDAV_NOT_CONFIGURED');
     }
     return new WebDavClient(webdav);
+  }
+
+  async function resolvePlayable(mediaPath) {
+    const now = Date.now();
+    const cached = playableCache.get(mediaPath);
+    if (cached && cached.expiresAt > now) return cached.playable;
+    if (cached) playableCache.delete(mediaPath);
+
+    const playable = await currentWebDav().resolvePlayable(mediaPath);
+    playableCache.set(mediaPath, { playable, expiresAt: now + PLAYABLE_CACHE_TTL_MS });
+    if (playableCache.size > 100) {
+      for (const [key, value] of playableCache) {
+        if (value.expiresAt <= now) playableCache.delete(key);
+      }
+      while (playableCache.size > 100) playableCache.delete(playableCache.keys().next().value);
+    }
+    return playable;
   }
 
   app.get('/healthz', (_req, res) => res.json({ ok: true, version: '2.0.0' }));
@@ -127,6 +146,7 @@ async function main() {
       }
       await new WebDavClient(candidate).test();
       await settings.setWebDav(req.body || {});
+      playableCache.clear();
       const snapshot = room.apply('clear', {}, req.session.nickname || '设置');
       if (snapshot) io.emit('room:state', snapshot);
       res.json({ ok: true, settings: settings.publicSettings() });
@@ -143,14 +163,14 @@ async function main() {
   app.get('/api/library', async (req, res, next) => {
     try {
       const result = await currentWebDav().list(String(req.query.path || ''));
-      result.items = result.items
+      const items = result.items
         .filter((item) => item.isDir || VIDEO_EXTENSIONS.has(path.extname(item.name).toLowerCase()))
-        .map((item) => ({ ...item, path: item.path || item.relativePath }))
+        .map((item) => ({ ...item, path: item.relativePath }))
         .sort((a, b) => a.isDir !== b.isDir
           ? (a.isDir ? -1 : 1)
           : a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
       res.set('Cache-Control', 'no-store');
-      res.json({ ok: true, path: result.path || result.relativePath || '', items: result.items });
+      res.json({ ok: true, path: result.relativePath || '', items });
     } catch (error) { next(error); }
   });
 
@@ -164,11 +184,18 @@ async function main() {
       if (!VIDEO_EXTENSIONS.has(extension)) {
         return res.status(400).json({ ok: false, error: '该文件不是支持的视频类型' });
       }
-      const playable = await currentWebDav().resolvePlayable(mediaPath);
+      const playable = await resolvePlayable(mediaPath);
+      const destination = new URL(playable.url);
+      if (!['http:', 'https:'].includes(destination.protocol)) {
+        throw new WebDavError('WebDAV 返回了浏览器无法使用的播放协议', 502, 'WEBDAV_BAD_DIRECT_URL');
+      }
+      if (req.secure && destination.protocol === 'http:') {
+        throw new WebDavError('WebDAV 只返回 HTTP 视频直链，而当前网站是 HTTPS；浏览器会阻止混合内容播放。请使用 HTTPS WebDAV/直链。', 409, 'WEBDAV_MIXED_CONTENT');
+      }
       res.set('Cache-Control', 'private, no-store');
       res.set('Referrer-Policy', 'no-referrer');
       res.set('X-TogetherVideo-Media-Mode', 'browser-direct');
-      res.status(302).set('Location', playable.url).end();
+      res.status(302).set('Location', destination.toString()).end();
     } catch (error) { next(error); }
   });
 
@@ -181,7 +208,7 @@ async function main() {
     const participantId = String(session.participantId || crypto.randomUUID());
     const nickname = cleanName(session.nickname);
     const isExisting = participants.has(participantId);
-    if (!isExisting && participants.size >= config.maxParticipants) {
+    if (!isExisting && participants.size >= 2) {
       socket.emit('room:full', { message: '当前已有两个人在线' });
       return setTimeout(() => socket.disconnect(true), 100);
     }
