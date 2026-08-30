@@ -31,8 +31,9 @@ function makePasswordHash(password) {
 
 function verifyPasswordHash(password, stored) {
   const [salt, hex] = String(stored || '').split(':');
-  if (!salt || !hex) return false;
+  if (!salt || !hex || !/^[0-9a-f]+$/i.test(hex) || hex.length % 2) return false;
   const expected = Buffer.from(hex, 'hex');
+  if (!expected.length) return false;
   const actual = crypto.scryptSync(String(password), salt, expected.length);
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
@@ -65,13 +66,12 @@ class SettingsStore {
   save() {
     const snapshot = JSON.stringify(this.data, null, 2);
     const tmp = `${this.file}.tmp`;
-    this.writeChain = this.writeChain
-      .then(async () => {
-        await fs.writeFile(tmp, snapshot, { encoding: 'utf8', mode: 0o600 });
-        await fs.rename(tmp, this.file);
-      })
-      .catch((error) => console.error('[settings] save failed:', error));
-    return this.writeChain;
+    const operation = this.writeChain.then(async () => {
+      await fs.writeFile(tmp, snapshot, { encoding: 'utf8', mode: 0o600 });
+      await fs.rename(tmp, this.file);
+    });
+    this.writeChain = operation.catch((error) => console.error('[settings] save failed:', error));
+    return operation;
   }
 
   get sessionSecret() { return this.data.sessionSecret; }
