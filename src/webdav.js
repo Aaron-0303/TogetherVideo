@@ -1,175 +1,212 @@
 const path = require('path');
 const { XMLParser } = require('fast-xml-parser');
 
-const parser = new XMLParser({
-  ignoreAttributes: false,
-  removeNSPrefix: true,
-  parseTagValue: false,
-  trimValues: true,
-});
-
 class WebDavError extends Error {
-  constructor(message, status = 502, details = null) {
+  constructor(message, status = 502, code = 'WEBDAV_ERROR', details = null) {
     super(message);
     this.name = 'WebDavError';
     this.status = status;
+    this.code = code;
     this.details = details;
   }
 }
 
-function safeDecode(value) {
-  try { return decodeURIComponent(value); } catch { return value; }
+function normalizeBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) throw new WebDavError('请先配置 WebDAV 地址', 400, 'WEBDAV_NOT_CONFIGURED');
+  let url;
+  try { url = new URL(raw); } catch { throw new WebDavError('WebDAV 地址格式不正确', 400, 'WEBDAV_BAD_URL'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new WebDavError('WebDAV 只支持 http/https 地址', 400, 'WEBDAV_BAD_URL');
+  url.hash = '';
+  url.search = '';
+  url.username = '';
+  url.password = '';
+  return url.toString().replace(/\/$/, '');
 }
 
-function normalizeRelative(value = '') {
-  const raw = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
-  if (raw.split('/').some((part) => part === '..')) throw new WebDavError('非法 WebDAV 路径', 400);
-  const normalized = path.posix.normalize(`/${raw}`).replace(/^\/+/, '');
-  return normalized === '.' ? '' : normalized;
+function normalizeRoot(value) {
+  let root = String(value || '/').trim().replace(/\\/g, '/');
+  if (!root.startsWith('/')) root = `/${root}`;
+  root = path.posix.normalize(root);
+  return root === '.' ? '/' : root;
 }
 
-function normalizePathname(value) {
-  const decoded = safeDecode(String(value || '')).replace(/\\/g, '/');
-  const normalized = path.posix.normalize(decoded || '/');
-  return normalized.length > 1 ? normalized.replace(/\/$/, '') : normalized;
+function cleanRelative(value = '') {
+  const raw = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const normalized = path.posix.normalize(raw || '.');
+  if (normalized === '.') return '';
+  if (normalized === '..' || normalized.startsWith('../')) throw new WebDavError('非法 WebDAV 路径', 400, 'WEBDAV_BAD_PATH');
+  return normalized.replace(/^\/+/, '');
 }
 
-function text(value) {
-  if (value == null) return '';
-  if (typeof value === 'string' || typeof value === 'number') return String(value);
-  if (typeof value === 'object' && '#text' in value) return String(value['#text']);
-  return '';
+function authHeader(username, password) {
+  if (!username && !password) return '';
+  return `Basic ${Buffer.from(`${username || ''}:${password || ''}`, 'utf8').toString('base64')}`;
 }
 
-function firstArray(value) { return Array.isArray(value) ? value : value ? [value] : []; }
+function asArray(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function bestProp(response) {
+  for (const propstat of asArray(response?.propstat)) {
+    if (String(propstat?.status || '').includes(' 200 ')) return propstat?.prop || {};
+  }
+  return asArray(response?.propstat)[0]?.prop || {};
+}
 
 class WebDavClient {
-  constructor(config = {}) {
-    if (!config.url) throw new WebDavError('WebDAV 尚未配置', 400);
-    this.base = new URL(config.url);
-    this.username = String(config.username || '');
-    this.password = String(config.password || '');
-    this.root = String(config.root || '/');
-    this.timeoutMs = Number(config.timeoutMs || 12000);
+  constructor(options = {}) {
+    this.timeoutMs = Number(options.timeoutMs || 15000);
+    this.parser = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true, trimValues: true });
+    this.update(options);
   }
 
-  authHeader() {
-    return `Basic ${Buffer.from(`${this.username}:${this.password}`, 'utf8').toString('base64')}`;
+  update(options = {}) {
+    this.baseUrl = options.url ? normalizeBaseUrl(options.url) : '';
+    this.username = String(options.username || '');
+    this.password = String(options.password || '');
+    this.root = normalizeRoot(options.root || '/');
   }
 
-  urlFor(relativePath = '') {
-    const relative = normalizeRelative(relativePath);
-    const url = new URL(this.base.toString());
-    const basePath = normalizePathname(url.pathname);
-    const rootPath = normalizePathname(this.root);
-    const fullPath = path.posix.join(basePath, rootPath, relative);
-    url.pathname = fullPath;
-    url.search = '';
-    url.hash = '';
-    return url;
-  }
+  configured() { return Boolean(this.baseUrl); }
 
-  directUrl(relativePath = '') {
-    const url = this.urlFor(relativePath);
-    url.username = this.username;
-    url.password = this.password;
+  buildUrl(relativePath = '') {
+    if (!this.baseUrl) throw new WebDavError('请先配置 WebDAV', 400, 'WEBDAV_NOT_CONFIGURED');
+    const relative = cleanRelative(relativePath);
+    const url = new URL(this.baseUrl);
+    const baseSegments = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+    const rootSegments = this.root.split('/').filter(Boolean);
+    const relativeSegments = relative.split('/').filter(Boolean);
+    const segments = [...baseSegments, ...rootSegments, ...relativeSegments].map((part) => encodeURIComponent(part));
+    url.pathname = `/${segments.join('/')}`;
     return url.toString();
   }
 
-  async propfind(relativePath = '', depth = 1) {
-    const target = this.urlFor(relativePath);
+  headers(extra = {}) {
+    const headers = { ...extra };
+    const auth = authHeader(this.username, this.password);
+    if (auth) headers.Authorization = auth;
+    return headers;
+  }
+
+  async fetchWithTimeout(url, options = {}, timeoutMs = this.timeoutMs) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const body = '<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/><d:resourcetype/><d:getcontentlength/><d:getlastmodified/><d:getcontenttype/></d:prop></d:propfind>';
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(target, {
-        method: 'PROPFIND',
-        headers: {
-          Authorization: this.authHeader(),
-          Depth: String(depth),
-          'Content-Type': 'application/xml; charset=utf-8',
-        },
-        body,
-        signal: controller.signal,
-        redirect: 'follow',
-      });
-      const xml = await response.text().catch(() => '');
-      if (response.status === 401 || response.status === 403) {
-        throw new WebDavError('WebDAV 认证失败，请检查用户名和应用密码', 400);
-      }
-      if (response.status === 404) throw new WebDavError('WebDAV 目录不存在，请检查地址和根目录', 400);
-      if (!response.ok && response.status !== 207) {
-        throw new WebDavError(`WebDAV 请求失败：HTTP ${response.status}`, 502, xml.slice(0, 500));
-      }
-      let parsed;
-      try { parsed = parser.parse(xml); }
-      catch (error) { throw new WebDavError(`WebDAV 返回内容无法解析：${error.message}`, 502); }
-      const multistatus = parsed?.multistatus;
-      const responses = firstArray(multistatus?.response);
-      if (!responses.length) throw new WebDavError('WebDAV 没有返回目录信息', 502);
-      return { target, responses };
+      return await fetch(url, { ...options, signal: controller.signal });
     } catch (error) {
-      if (error?.name === 'AbortError') throw new WebDavError('WebDAV 连接超时', 504);
+      if (error.name === 'AbortError') throw new WebDavError('WebDAV 请求超时', 504, 'WEBDAV_TIMEOUT');
       if (error instanceof WebDavError) throw error;
-      throw new WebDavError(`无法连接 WebDAV：${error.message}`, 502);
+      throw new WebDavError(`无法连接 WebDAV：${error.message}`, 502, 'WEBDAV_CONNECT_FAILED');
     } finally {
       clearTimeout(timer);
     }
   }
 
-  responseProp(response) {
-    for (const propstat of firstArray(response?.propstat)) {
-      const status = text(propstat?.status);
-      if (!status || /\s200\s/.test(status)) return propstat?.prop || {};
+  checkStatus(response) {
+    if (response.status === 401 || response.status === 403) {
+      throw new WebDavError('WebDAV 用户名或密码错误，或没有访问权限', 401, 'WEBDAV_AUTH_FAILED');
     }
-    return firstArray(response?.propstat)[0]?.prop || {};
+    if (response.status === 404) throw new WebDavError('WebDAV 路径不存在', 404, 'WEBDAV_NOT_FOUND');
+    if (!response.ok && response.status !== 207) {
+      throw new WebDavError(`WebDAV 返回 HTTP ${response.status}`, 502, 'WEBDAV_HTTP_ERROR');
+    }
+  }
+
+  async propfind(relativePath = '', depth = 1) {
+    const url = this.buildUrl(relativePath);
+    const body = `<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:"><d:prop><d:displayname/><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/></d:prop></d:propfind>`;
+    const response = await this.fetchWithTimeout(url, {
+      method: 'PROPFIND',
+      headers: this.headers({ Depth: String(depth), 'Content-Type': 'application/xml; charset=utf-8' }),
+      body,
+      redirect: 'follow',
+    });
+    this.checkStatus(response);
+    const xml = await response.text();
+    let parsed;
+    try { parsed = this.parser.parse(xml); }
+    catch { throw new WebDavError('WebDAV 返回的目录数据无法解析', 502, 'WEBDAV_BAD_XML'); }
+    return { url, responses: asArray(parsed?.multistatus?.response) };
   }
 
   async test() {
-    const { target, responses } = await this.propfind('', 0);
-    const prop = this.responseProp(responses[0]);
-    return {
-      ok: true,
-      displayName: text(prop.displayname) || path.posix.basename(normalizePathname(target.pathname)) || '/',
-      url: `${target.origin}${target.pathname}`,
-    };
+    const { responses } = await this.propfind('', 0);
+    return { ok: true, message: responses.length ? 'WebDAV 连接成功' : 'WebDAV 已响应' };
   }
 
   async list(relativePath = '') {
-    const relative = normalizeRelative(relativePath);
-    const { target, responses } = await this.propfind(relative, 1);
-    const targetPath = normalizePathname(target.pathname);
+    const relative = cleanRelative(relativePath);
+    const { url, responses } = await this.propfind(relative, 1);
+    const requestedPath = decodeURIComponent(new URL(url).pathname).replace(/\/+$/, '') || '/';
     const items = [];
 
     for (const response of responses) {
-      const href = text(response?.href);
-      if (!href) continue;
+      const href = String(response?.href || '');
       let hrefPath = '';
-      try { hrefPath = normalizePathname(new URL(href, target).pathname); }
-      catch { hrefPath = normalizePathname(href); }
-      if (hrefPath === targetPath) continue;
+      try { hrefPath = decodeURIComponent(new URL(href, this.baseUrl).pathname).replace(/\/+$/, '') || '/'; }
+      catch { continue; }
+      if (hrefPath === requestedPath) continue;
 
-      const prop = this.responseProp(response);
-      const resourceType = prop?.resourcetype;
-      const isDir = Boolean(resourceType && typeof resourceType === 'object' && Object.prototype.hasOwnProperty.call(resourceType, 'collection'));
-      let name = text(prop?.displayname).trim();
-      if (!name) name = path.posix.basename(hrefPath);
-      name = safeDecode(name).replace(/\/$/, '');
+      const prop = bestProp(response);
+      const fallbackName = hrefPath.split('/').filter(Boolean).pop() || '';
+      const name = String(prop.displayname || fallbackName).trim();
       if (!name || name === '.' || name === '..') continue;
-
-      const itemRelative = normalizeRelative(relative ? `${relative}/${name}` : name);
+      const resourceType = prop.resourcetype || {};
+      const isDir = Object.prototype.hasOwnProperty.call(resourceType, 'collection');
+      const childRelative = cleanRelative(relative ? `${relative}/${name}` : name);
       items.push({
         name,
-        path: itemRelative,
+        relativePath: childRelative,
         isDir,
-        size: Number.parseInt(text(prop?.getcontentlength) || '0', 10) || 0,
-        modified: text(prop?.getlastmodified) || '',
-        contentType: text(prop?.getcontenttype) || '',
+        size: Number(prop.getcontentlength || 0),
+        contentType: String(prop.getcontenttype || ''),
+        modified: String(prop.getlastmodified || ''),
       });
     }
+    return { relativePath: relative, items };
+  }
 
-    return { path: relative, items };
+  async probeDirect(relativePath, method) {
+    const url = this.buildUrl(relativePath);
+    const headers = this.headers(method === 'GET' ? { Range: 'bytes=0-0' } : {});
+    const response = await this.fetchWithTimeout(url, { method, headers, redirect: 'manual' });
+    if (response.status === 401 || response.status === 403) this.checkStatus(response);
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      await response.body?.cancel().catch(() => {});
+      if (!location) throw new WebDavError('WebDAV 返回了重定向但没有 Location', 502, 'WEBDAV_BAD_REDIRECT');
+      return new URL(location, url).toString();
+    }
+
+    await response.body?.cancel().catch(() => {});
+    return '';
+  }
+
+  async resolvePlayable(relativePath) {
+    const relative = cleanRelative(relativePath);
+    const webdavUrl = this.buildUrl(relative);
+
+    if (!this.username && !this.password) return { url: webdavUrl, strategy: 'direct-webdav' };
+
+    let directUrl = '';
+    try { directUrl = await this.probeDirect(relative, 'HEAD'); }
+    catch (error) { if (error.code === 'WEBDAV_AUTH_FAILED') throw error; }
+    if (!directUrl) directUrl = await this.probeDirect(relative, 'GET');
+
+    if (!directUrl) {
+      throw new WebDavError(
+        '这个 WebDAV 需要账号认证，但文件请求没有返回可供浏览器直连的 302 地址。为保证自建服务器不代理视频，TogetherVideo 不会中转该文件。请使用会返回 302/直链的 123 云盘 WebDAV 或无需认证的 WebDAV 播放地址。',
+        409,
+        'WEBDAV_NO_BROWSER_DIRECT_URL',
+      );
+    }
+
+    return { url: directUrl, strategy: 'webdav-redirect' };
   }
 }
 
-module.exports = { WebDavClient, WebDavError, normalizeRelative };
+module.exports = { WebDavClient, WebDavError, normalizeBaseUrl, normalizeRoot, cleanRelative };
