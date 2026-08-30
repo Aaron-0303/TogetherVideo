@@ -1,13 +1,14 @@
 {
   "name": "together-video",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "A private two-person synchronized video room powered by OpenList direct links.",
-  "main": "server.js",
+  "description": "A private two-person synchronized video room with zero-touch OpenList bootstrap.",
+  "main": "launcher.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node launcher.js",
+    "start:app": "node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
-    "check": "node --check server.js && node --check src/config.js && node --check src/openlist.js && node --check src/store.js && node --check src/rooms.js && node --check public/app.js"
+    "check": "node --check launcher.js && node --check server.js && node --check src/config.js && node --check src/openlist.js && node --check src/openlist-admin.js && node --check src/settings.js && node --check src/store.js && node --check src/rooms.js && node --check public/app.js"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
@@ -16,6 +17,7 @@
     "express": "^4.21.2",
     "helmet": "^8.1.0",
     "hls.js": "^1.5.18",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "tar": "^7.4.3"
   }
 }
