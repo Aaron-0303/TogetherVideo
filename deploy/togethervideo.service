@@ -1,0 +1,23 @@
+[Unit]
+Description=TogetherVideo private watch-together service
+After=network-online.target openlist.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/TogetherVideo
+EnvironmentFile=/opt/TogetherVideo/.env
+ExecStart=/usr/bin/node /opt/TogetherVideo/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/TogetherVideo/data
+
+[Install]
+WantedBy=multi-user.target
