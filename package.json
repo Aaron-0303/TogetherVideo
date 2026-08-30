@@ -1,6 +1,6 @@
 {
   "name": "together-video",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "A private two-person synchronized video room with zero-touch OpenList bootstrap.",
   "main": "launcher.js",
