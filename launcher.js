@@ -13,59 +13,81 @@ const configPath = path.join(runtimeDir, 'data', 'config.json');
 const adminSecretPath = path.join(runtimeDir, '.admin-secret');
 const adminReadyPath = path.join(runtimeDir, '.admin-ready');
 const baseUrl = process.env.OPENLIST_BASE_URL || 'http://127.0.0.1:5244';
+const managedOpenList = String(process.env.OPENLIST_MANAGED || 'true').toLowerCase() !== 'false';
+const openListVersion = process.env.OPENLIST_VERSION || 'v4.2.5';
 let openlistProcess = null;
 let appProcess = null;
+let intentionallyStoppingOpenList = false;
+let shuttingDown = false;
+let restartTimer = null;
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 async function isOpenListReady() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
     const response = await fetch(`${baseUrl}/api/public/settings`, { signal: controller.signal });
-    clearTimeout(timer);
     return response.ok;
-  } catch { return false; }
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function assetName() {
-  if (process.platform !== 'linux') throw new Error('自动 OpenList 当前只支持 Linux 服务器；其他系统请设置 OPENLIST_MANAGED=false 并提供外部 OpenList。');
+  if (process.platform !== 'linux') {
+    throw new Error('自动 OpenList 当前只支持 Linux 服务器；其他系统请设置 OPENLIST_MANAGED=false 并提供外部 OpenList。');
+  }
   if (process.arch === 'x64') return 'openlist-linux-amd64.tar.gz';
   if (process.arch === 'arm64') return 'openlist-linux-arm64.tar.gz';
   throw new Error(`暂不支持自动安装 OpenList 的架构: ${process.arch}`);
 }
 
 async function download(url, target) {
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok || !response.body) throw new Error(`下载 OpenList 失败: HTTP ${response.status}`);
-  const file = fs.createWriteStream(target);
-  await new Promise((resolve, reject) => {
-    const reader = response.body.getReader();
-    const pump = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!file.write(Buffer.from(value))) await new Promise((r) => file.once('drain', r));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch(url, { redirect: 'follow', signal: controller.signal });
+    if (!response.ok || !response.body) throw new Error(`下载 OpenList 失败: HTTP ${response.status}`);
+    const file = fs.createWriteStream(target);
+    await new Promise((resolve, reject) => {
+      const reader = response.body.getReader();
+      const pump = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!file.write(Buffer.from(value))) await new Promise((resume) => file.once('drain', resume));
+          }
+          file.end(resolve);
+        } catch (error) {
+          file.destroy();
+          reject(error);
         }
-        file.end(resolve);
-      } catch (error) { file.destroy(); reject(error); }
-    };
-    pump();
-  });
+      };
+      pump();
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function ensureBinary() {
   await fsp.mkdir(runtimeDir, { recursive: true });
-  try { await fsp.access(binaryPath, fs.constants.X_OK); return; } catch {}
+  try {
+    await fsp.access(binaryPath, fs.constants.X_OK);
+    return;
+  } catch {}
   const asset = assetName();
-  const url = `https://github.com/OpenListTeam/OpenList/releases/latest/download/${asset}`;
-  console.log(`[bootstrap] downloading OpenList: ${asset}`);
+  const url = `https://github.com/OpenListTeam/OpenList/releases/download/${openListVersion}/${asset}`;
+  console.log(`[bootstrap] downloading OpenList ${openListVersion}: ${asset}`);
   await download(url, archivePath);
   await tar.x({ file: archivePath, cwd: runtimeDir });
   await fsp.chmod(binaryPath, 0o755);
   await fsp.rm(archivePath, { force: true });
-  console.log('[bootstrap] OpenList binary ready');
+  console.log(`[bootstrap] OpenList ${openListVersion} binary ready`);
 }
 
 async function forceLoopbackConfig() {
@@ -80,6 +102,22 @@ async function forceLoopbackConfig() {
   }
 }
 
+function scheduleOpenListRestart() {
+  if (!managedOpenList || shuttingDown || intentionallyStoppingOpenList || restartTimer) return;
+  restartTimer = setTimeout(async () => {
+    restartTimer = null;
+    if (shuttingDown || intentionallyStoppingOpenList || await isOpenListReady()) return;
+    try {
+      console.warn('[bootstrap] restarting OpenList after unexpected exit');
+      spawnOpenList();
+    } catch (error) {
+      console.error('[bootstrap] OpenList restart failed:', error.message);
+      scheduleOpenListRestart();
+    }
+  }, 2500);
+  restartTimer.unref?.();
+}
+
 function spawnOpenList() {
   const child = spawn(binaryPath, ['server', '--force-bin-dir', '--log-std'], {
     cwd: runtimeDir,
@@ -88,7 +126,11 @@ function spawnOpenList() {
   });
   child.stdout.on('data', (chunk) => process.stdout.write(`[openlist] ${chunk}`));
   child.stderr.on('data', (chunk) => process.stderr.write(`[openlist] ${chunk}`));
-  child.on('exit', (code, signal) => console.warn(`[bootstrap] OpenList exited code=${code} signal=${signal || ''}`));
+  child.on('exit', (code, signal) => {
+    console.warn(`[bootstrap] OpenList exited code=${code} signal=${signal || ''}`);
+    if (openlistProcess === child) openlistProcess = null;
+    scheduleOpenListRestart();
+  });
   openlistProcess = child;
   return child;
 }
@@ -106,13 +148,24 @@ async function waitForOpenList(timeoutMs = 30000) {
 async function stopOpenList() {
   const child = openlistProcess;
   if (!child || child.exitCode != null) return;
-  await new Promise((resolve) => {
-    const timer = setTimeout(() => { if (child.exitCode == null) child.kill('SIGKILL'); resolve(); }, 5000);
-    child.once('exit', () => { clearTimeout(timer); resolve(); });
-    child.kill('SIGTERM');
-  });
-  openlistProcess = null;
-  await sleep(250);
+  intentionallyStoppingOpenList = true;
+  try {
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (child.exitCode == null) child.kill('SIGKILL');
+        resolve();
+      }, 5000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      child.kill('SIGTERM');
+    });
+    openlistProcess = null;
+    await sleep(250);
+  } finally {
+    intentionallyStoppingOpenList = false;
+  }
 }
 
 async function ensureAdminSecret() {
@@ -128,11 +181,13 @@ function setAdminPassword(secret) {
     encoding: 'utf8',
     timeout: 15000,
   });
-  if (result.status !== 0) throw new Error(`设置 OpenList 内部管理员密码失败: ${(result.stderr || result.stdout || '').trim()}`);
+  if (result.status !== 0) {
+    throw new Error(`设置 OpenList 内部管理员密码失败: ${(result.stderr || result.stdout || '').trim()}`);
+  }
 }
 
 async function startManagedOpenList() {
-  if (String(process.env.OPENLIST_MANAGED || 'true').toLowerCase() === 'false') return null;
+  if (!managedOpenList) return null;
   if (await isOpenListReady()) {
     console.log('[bootstrap] using existing OpenList at', baseUrl);
     return null;
@@ -140,7 +195,10 @@ async function startManagedOpenList() {
   await ensureBinary();
   const secret = await ensureAdminSecret();
   let adminReady = false;
-  try { await fsp.access(adminReadyPath); adminReady = true; } catch {}
+  try {
+    await fsp.access(adminReadyPath);
+    adminReady = true;
+  } catch {}
 
   if (adminReady) {
     await forceLoopbackConfig();
@@ -167,12 +225,16 @@ async function startManagedOpenList() {
 function startApp() {
   appProcess = spawn(process.execPath, ['server.js'], { cwd: root, env: process.env, stdio: 'inherit' });
   appProcess.on('exit', (code, signal) => {
+    shuttingDown = true;
+    if (restartTimer) clearTimeout(restartTimer);
     if (openlistProcess && openlistProcess.exitCode == null) openlistProcess.kill('SIGTERM');
     process.exitCode = code ?? (signal ? 1 : 0);
   });
 }
 
 function shutdown(signal) {
+  shuttingDown = true;
+  if (restartTimer) clearTimeout(restartTimer);
   if (appProcess && appProcess.exitCode == null) appProcess.kill(signal);
   if (openlistProcess && openlistProcess.exitCode == null) openlistProcess.kill(signal);
   setTimeout(() => process.exit(0), 1500).unref();
