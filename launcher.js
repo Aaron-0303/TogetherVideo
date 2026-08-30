@@ -10,6 +10,7 @@ const runtimeDir = path.join(root, '.runtime', 'openlist');
 const archivePath = path.join(runtimeDir, 'openlist.tar.gz');
 const binaryPath = path.join(runtimeDir, process.platform === 'win32' ? 'openlist.exe' : 'openlist');
 const adminSecretPath = path.join(runtimeDir, '.admin-secret');
+const adminReadyPath = path.join(runtimeDir, '.admin-ready');
 const baseUrl = process.env.OPENLIST_BASE_URL || 'http://127.0.0.1:5244';
 let openlistProcess = null;
 let appProcess = null;
@@ -66,6 +67,19 @@ async function ensureBinary() {
   console.log('[bootstrap] OpenList binary ready');
 }
 
+function spawnOpenList() {
+  const child = spawn(binaryPath, ['server', '--force-bin-dir', '--log-std'], {
+    cwd: runtimeDir,
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => process.stdout.write(`[openlist] ${chunk}`));
+  child.stderr.on('data', (chunk) => process.stderr.write(`[openlist] ${chunk}`));
+  child.on('exit', (code, signal) => console.warn(`[bootstrap] OpenList exited code=${code} signal=${signal || ''}`));
+  openlistProcess = child;
+  return child;
+}
+
 async function waitForOpenList(timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -74,6 +88,18 @@ async function waitForOpenList(timeoutMs = 30000) {
     await sleep(500);
   }
   return false;
+}
+
+async function stopOpenList() {
+  const child = openlistProcess;
+  if (!child || child.exitCode != null) return;
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => { if (child.exitCode == null) child.kill('SIGKILL'); resolve(); }, 5000);
+    child.once('exit', () => { clearTimeout(timer); resolve(); });
+    child.kill('SIGTERM');
+  });
+  openlistProcess = null;
+  await sleep(250);
 }
 
 async function ensureAdminSecret() {
@@ -89,11 +115,7 @@ function setAdminPassword(secret) {
     encoding: 'utf8',
     timeout: 15000,
   });
-  if (result.status !== 0) {
-    console.warn('[bootstrap] unable to set OpenList admin password:', (result.stderr || result.stdout || '').trim());
-    return false;
-  }
-  return true;
+  if (result.status !== 0) throw new Error(`设置 OpenList 内部管理员密码失败: ${(result.stderr || result.stdout || '').trim()}`);
 }
 
 async function startManagedOpenList() {
@@ -103,18 +125,20 @@ async function startManagedOpenList() {
     return null;
   }
   await ensureBinary();
-  openlistProcess = spawn(binaryPath, ['server', '--force-bin-dir', '--log-std'], {
-    cwd: runtimeDir,
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  openlistProcess.stdout.on('data', (chunk) => process.stdout.write(`[openlist] ${chunk}`));
-  openlistProcess.stderr.on('data', (chunk) => process.stderr.write(`[openlist] ${chunk}`));
-  openlistProcess.on('exit', (code, signal) => console.warn(`[bootstrap] OpenList exited code=${code} signal=${signal || ''}`));
-  const ready = await waitForOpenList();
-  if (!ready) throw new Error('OpenList 启动失败或 30 秒内未就绪');
   const secret = await ensureAdminSecret();
-  setAdminPassword(secret);
+  spawnOpenList();
+  if (!(await waitForOpenList())) throw new Error('OpenList 启动失败或 30 秒内未就绪');
+
+  let adminReady = false;
+  try { await fsp.access(adminReadyPath); adminReady = true; } catch {}
+  if (!adminReady) {
+    console.log('[bootstrap] initializing private OpenList admin credentials');
+    await stopOpenList();
+    setAdminPassword(secret);
+    await fsp.writeFile(adminReadyPath, 'ok\n');
+    spawnOpenList();
+    if (!(await waitForOpenList())) throw new Error('OpenList 初始化管理员后重新启动失败');
+  }
   process.env.OPENLIST_ADMIN_PASSWORD = secret;
   return secret;
 }
