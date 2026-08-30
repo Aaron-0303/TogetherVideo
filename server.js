@@ -1,238 +1,242 @@
+const crypto = require('crypto');
 const http = require('http');
 const path = require('path');
 const express = require('express');
-const cookieSession = require('cookie-session');
 const compression = require('compression');
+const cookieSession = require('cookie-session');
 const helmet = require('helmet');
 const { Server } = require('socket.io');
 
 const config = require('./src/config');
-const { OpenListClient, OpenListError } = require('./src/openlist');
-const OpenListAdmin = require('./src/openlist-admin');
-const SettingsStore = require('./src/settings');
-const JsonStore = require('./src/store');
-const { RoomManager, cleanName } = require('./src/rooms');
+const { SettingsStore } = require('./src/settings');
+const { WebDavClient, WebDavError } = require('./src/webdav');
+const { WatchRoom, cleanMediaPath } = require('./src/watch-room');
 
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.m3u8', '.ts']);
-const PLAY_LINK_TTL_MS = 60_000;
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.webm', '.mov', '.ogv', '.ogg', '.mkv']);
 
-function classifyDelivery(url, fallbackExtension = '') {
-  const value = String(url || '').toLowerCase();
-  let pathname = value;
-  try { pathname = new URL(value).pathname.toLowerCase(); } catch {}
-  if (pathname.endsWith('.m3u8') || value.includes('.m3u8?') || value.includes('format=m3u8')) return 'hls';
-  if (String(fallbackExtension).toLowerCase() === '.m3u8') return 'hls';
-  return 'file';
+function cleanName(value) {
+  return String(value || '访客').trim().replace(/[<>]/g, '').slice(0, 20) || '访客';
 }
 
 async function main() {
-  const store = new JsonStore(config.dataFile);
-  await store.init();
-  const settings = new SettingsStore(config.settingsFile, {
-    mediaRoot: config.openlist.root,
-    sessionSecret: process.env.SESSION_SECRET || '',
-    passwordChanged: config.sitePassword !== 'change-me',
-  });
+  const settings = new SettingsStore(config.settingsFile, config.sitePassword);
   await settings.init();
-
-  const openlist = new OpenListClient(config.openlist);
-  openlist.setRoot(settings.get('mediaRoot') || config.openlist.root);
-  const openlistAdmin = new OpenListAdmin({ baseUrl: config.openlist.baseUrl, password: config.openlistAdminPassword });
-  if (config.openlistAdminPassword) {
-    openlist.setTokenProvider((force) => openlistAdmin.getToken(force));
-    try {
-      const migrated = await openlistAdmin.ensureDownloadMode();
-      if (migrated?.ready) console.log(`[TogetherVideo] QuarkTV default playback mode: ${migrated.playMode || 'download'}`);
-    } catch (error) {
-      console.warn('[TogetherVideo] unable to restore QuarkTV download mode:', error.message);
-    }
-  }
-
-  // Browsers can issue several range/resource requests for the same media URL. Resolving a
-  // QuarkTV link on every request is expensive, and compat mode would otherwise repeatedly
-  // toggle the OpenList driver. Cache only the short-lived resolved redirect URL, never bytes.
-  const playLinkCache = new Map();
-  const clearPlayLinkCache = () => playLinkCache.clear();
-  async function resolvePlayLink(relativePath, mode) {
-    const key = `${openlist.root}\n${mode}\n${relativePath}`;
-    const now = Date.now();
-    const cached = playLinkCache.get(key);
-    if (cached?.value && cached.expiresAt > now) return cached.value;
-    if (cached?.promise) return cached.promise;
-
-    const promise = (async () => {
-      const requestedMode = mode === 'compat' ? 'streaming' : 'download';
-      const resolve = () => openlist.resolvePlayable(relativePath);
-      const playable = config.openlistAdminPassword
-        ? await openlistAdmin.withPlayMode(requestedMode, resolve)
-        : await resolve();
-      const extension = path.extname(path.posix.basename(relativePath)).toLowerCase();
-      return {
-        playable,
-        delivery: classifyDelivery(playable.url, extension),
-        extension,
-      };
-    })();
-
-    playLinkCache.set(key, { promise, expiresAt: now + PLAY_LINK_TTL_MS });
-    try {
-      const value = await promise;
-      playLinkCache.set(key, { value, expiresAt: Date.now() + PLAY_LINK_TTL_MS });
-      return value;
-    } catch (error) {
-      playLinkCache.delete(key);
-      throw error;
-    }
-  }
+  const room = new WatchRoom(config.stateFile);
+  await room.init();
 
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
+  app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+  app.use(compression());
+  app.use(express.json({ limit: '64kb' }));
 
   const sessionMiddleware = cookieSession({
-    name: 'together_session',
-    keys: [settings.get('sessionSecret')],
+    name: 'together_v2',
+    keys: [settings.sessionSecret],
     maxAge: 1000 * 60 * 60 * 24 * 30,
     sameSite: 'lax',
     httpOnly: true,
     secure: config.cookieSecure,
   });
-
-  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
-  app.use(compression());
-  app.use(express.json({ limit: '64kb' }));
   app.use(sessionMiddleware);
-  app.get('/healthz', (_req, res) => res.json({ ok: true, openlistBootstrapError: config.openlistBootstrapError || undefined }));
+
+  const server = http.createServer(app);
+  const io = new Server(server, {
+    transports: ['websocket', 'polling'],
+    serveClient: true,
+    maxHttpBufferSize: 64 * 1024,
+  });
+  io.engine.use(sessionMiddleware);
+
+  const participants = new Map();
+
+  function participantList() {
+    return [...participants.entries()].map(([id, item]) => ({
+      id,
+      nickname: item.nickname,
+      buffering: [...item.buffering.values()].some(Boolean),
+    }));
+  }
+
+  function broadcastPresence() {
+    io.emit('presence:update', { participants: participantList(), limit: config.maxParticipants });
+  }
+
+  function requireAuth(req, res, next) {
+    if (req.session?.authenticated) return next();
+    res.status(401).json({ ok: false, error: '请先登录' });
+  }
+
+  function currentWebDav() {
+    const webdav = settings.webdav();
+    if (!webdav.url || !webdav.username || !webdav.password) throw new WebDavError('请先在设置中配置 WebDAV', 400);
+    return new WebDavClient(webdav);
+  }
+
+  app.get('/healthz', (_req, res) => res.json({ ok: true, version: '2.0.0' }));
 
   app.post('/api/login', (req, res) => {
-    const password = String(req.body?.password || '');
-    const nickname = cleanName(req.body?.nickname);
-    if (!password || !settings.verifyPassword(password, config.sitePassword)) {
-      return res.status(401).json({ ok: false, error: '密码错误' });
-    }
+    if (!settings.verifySitePassword(req.body?.password)) return res.status(401).json({ ok: false, error: '访问密码错误' });
     req.session.authenticated = true;
-    req.session.nickname = nickname;
-    res.json({ ok: true, nickname, defaultRoom: config.defaultRoom, passwordChanged: settings.publicSettings().passwordChanged });
-  });
-
-  app.post('/api/logout', (req, res) => { req.session = null; res.json({ ok: true }); });
-  app.get('/api/session', (req, res) => res.json({
-    authenticated: Boolean(req.session?.authenticated),
-    nickname: req.session?.nickname || '',
-    defaultRoom: config.defaultRoom,
-    passwordChanged: settings.publicSettings().passwordChanged,
-  }));
-  app.use('/api', (req, res, next) => req.session?.authenticated ? next() : res.status(401).json({ ok: false, error: '请先登录' }));
-
-  app.get('/api/setup/status', async (_req, res) => {
-    const ready = await openlistAdmin.health();
-    let quark = { exists: false, ready: false, status: 'not-configured', qr: '' };
-    let adminError = '';
-    if (ready && config.openlistAdminPassword) {
-      try { quark = openlistAdmin.describe(await openlistAdmin.getQuark()); }
-      catch (error) { adminError = error.message; }
-    } else if (ready && !config.openlistAdminPassword) {
-      adminError = '当前使用外部 OpenList，未提供 OPENLIST_ADMIN_PASSWORD，无法在本站管理 QuarkTV。';
-    }
+    req.session.nickname = cleanName(req.body?.nickname);
+    req.session.participantId = req.session.participantId || crypto.randomUUID();
     res.json({
       ok: true,
-      openlist: { ready, bootstrapError: config.openlistBootstrapError || '', adminError },
-      quark,
+      nickname: req.session.nickname,
+      participantId: req.session.participantId,
       settings: settings.publicSettings(),
-      firstRun: !settings.publicSettings().passwordChanged || !quark.ready,
     });
   });
 
-  app.post('/api/setup/quark/start', async (_req, res, next) => {
+  app.post('/api/logout', (req, res) => {
+    req.session = null;
+    res.json({ ok: true });
+  });
+
+  app.get('/api/session', (req, res) => res.json({
+    authenticated: Boolean(req.session?.authenticated),
+    nickname: req.session?.nickname || '',
+    participantId: req.session?.participantId || '',
+    settings: settings.publicSettings(),
+  }));
+
+  app.use('/api', requireAuth);
+
+  app.get('/api/settings', (_req, res) => res.json({ ok: true, settings: settings.publicSettings() }));
+
+  app.post('/api/webdav/test', async (req, res, next) => {
     try {
-      clearPlayLinkCache();
-      res.json({ ok: true, quark: await openlistAdmin.createQuark() });
+      const candidate = settings.previewWebDav(req.body || {});
+      if (!candidate.url || !candidate.username || !candidate.password) throw new WebDavError('请完整填写 WebDAV 地址、用户名和密码', 400);
+      const result = await new WebDavClient(candidate).test();
+      res.json({ ok: true, result });
     } catch (error) { next(error); }
   });
 
-  app.post('/api/setup/quark/finish', async (_req, res, next) => {
+  app.put('/api/settings/webdav', async (req, res, next) => {
     try {
-      clearPlayLinkCache();
-      res.json({ ok: true, quark: await openlistAdmin.finishQuark() });
+      const candidate = settings.previewWebDav(req.body || {});
+      if (!candidate.url || !candidate.username || !candidate.password) throw new WebDavError('请完整填写 WebDAV 地址、用户名和密码', 400);
+      await new WebDavClient(candidate).test();
+      await settings.setWebDav(req.body || {});
+      const snapshot = room.apply('clear', {}, req.session.nickname || '设置');
+      if (snapshot) io.emit('room:state', snapshot);
+      res.json({ ok: true, settings: settings.publicSettings() });
     } catch (error) { next(error); }
   });
 
-  app.post('/api/setup/quark/reset', async (_req, res, next) => {
+  app.put('/api/settings/password', async (req, res, next) => {
     try {
-      clearPlayLinkCache();
-      res.json({ ok: true, quark: await openlistAdmin.resetQuark() });
-    } catch (error) { next(error); }
-  });
-
-  app.post('/api/settings', async (req, res, next) => {
-    try {
-      const result = {};
-      if (req.body?.mediaRoot != null) {
-        const root = openlist.setRoot(String(req.body.mediaRoot || '/QuarkTV'));
-        clearPlayLinkCache();
-        await settings.set({ mediaRoot: root });
-        result.mediaRoot = root;
-      }
-      if (req.body?.newPassword) {
-        await settings.setPassword(String(req.body.newPassword));
-        result.passwordChanged = true;
-      }
-      res.json({ ok: true, settings: { ...settings.publicSettings(), ...result } });
+      await settings.setSitePassword(req.body?.password);
+      res.json({ ok: true });
     } catch (error) { next(error); }
   });
 
   app.get('/api/library', async (req, res, next) => {
     try {
-      const result = await openlist.list(String(req.query.path || ''));
+      const result = await currentWebDav().list(String(req.query.path || ''));
       result.items = result.items
         .filter((item) => item.isDir || VIDEO_EXTENSIONS.has(path.extname(item.name).toLowerCase()))
-        .sort((a, b) => a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-      res.json({ ok: true, root: openlist.root, ...result });
+        .sort((a, b) => a.isDir !== b.isDir
+          ? (a.isDir ? -1 : 1)
+          : a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+      res.json({ ok: true, ...result });
     } catch (error) { next(error); }
   });
 
-  app.get('/api/play', async (req, res, next) => {
+  // This route never fetches media bytes. It only issues a 302 to the WebDAV file URL.
+  // The browser follows the redirect and downloads/streams the video from WebDAV directly.
+  app.get('/api/media', (req, res, next) => {
     try {
-      const relativePath = String(req.query.path || '');
-      if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
-      const mode = String(req.query.mode || 'original') === 'compat' ? 'compat' : 'original';
-      const { playable } = await resolvePlayLink(relativePath, mode);
-      const headerNames = playable.headers && typeof playable.headers === 'object' ? Object.keys(playable.headers) : [];
-      if (headerNames.length) console.warn(`[play] provider headers ignored by redirect: ${headerNames.join(', ')}`);
+      const mediaPath = cleanMediaPath(req.query.path);
+      if (!mediaPath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
+      const extension = path.extname(mediaPath).toLowerCase();
+      if (!VIDEO_EXTENSIONS.has(extension)) return res.status(400).json({ ok: false, error: '该文件不是支持的视频类型' });
+      const directUrl = currentWebDav().directUrl(mediaPath);
       res.set('Cache-Control', 'private, no-store');
-      res.redirect(302, playable.url);
+      res.set('Referrer-Policy', 'no-referrer');
+      res.status(302).set('Location', directUrl).end();
     } catch (error) { next(error); }
   });
 
-  app.get('/api/play-info', async (req, res, next) => {
-    try {
-      const relativePath = String(req.query.path || '');
-      if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
-      const mode = String(req.query.mode || 'original') === 'compat' ? 'compat' : 'original';
-      const name = path.posix.basename(relativePath);
-      const resolved = await resolvePlayLink(relativePath, mode);
-      res.json({
-        ok: true,
-        name,
-        extension: resolved.extension,
-        delivery: resolved.delivery,
-        mode,
-        playUrl: `/api/play?path=${encodeURIComponent(relativePath)}&mode=${mode}`,
-      });
-    } catch (error) { next(error); }
+  io.use((socket, next) => socket.request.session?.authenticated ? next() : next(new Error('unauthorized')));
+
+  io.on('connection', (socket) => {
+    const session = socket.request.session || {};
+    const participantId = String(session.participantId || crypto.randomUUID());
+    const nickname = cleanName(session.nickname);
+    const isExisting = participants.has(participantId);
+    if (!isExisting && participants.size >= config.maxParticipants) {
+      socket.emit('room:full', { message: '当前已有两个人在线' });
+      return setTimeout(() => socket.disconnect(true), 100);
+    }
+
+    if (!participants.has(participantId)) {
+      participants.set(participantId, { nickname, sockets: new Set(), buffering: new Map() });
+    }
+    const participant = participants.get(participantId);
+    participant.nickname = nickname;
+    participant.sockets.add(socket.id);
+    participant.buffering.set(socket.id, false);
+    socket.data.participantId = participantId;
+    socket.data.nickname = nickname;
+
+    socket.emit('room:snapshot', room.snapshot());
+    broadcastPresence();
+
+    socket.on('sync:request', (ack = () => {}) => {
+      if (typeof ack === 'function') ack(room.snapshot());
+    });
+
+    socket.on('presence:buffering', (payload = {}) => {
+      const current = participants.get(participantId);
+      if (!current) return;
+      current.buffering.set(socket.id, Boolean(payload.buffering));
+      broadcastPresence();
+    });
+
+    const apply = (action, payload = {}) => {
+      const snapshot = room.apply(action, payload, nickname);
+      if (snapshot) io.emit('room:state', snapshot);
+    };
+
+    socket.on('media:select', (payload = {}) => {
+      const mediaPath = cleanMediaPath(payload.mediaPath);
+      if (!mediaPath || !VIDEO_EXTENSIONS.has(path.extname(mediaPath).toLowerCase())) return;
+      apply('select', { mediaPath, mediaName: payload.mediaName });
+    });
+    socket.on('player:play', (payload = {}) => apply('play', payload));
+    socket.on('player:pause', (payload = {}) => apply('pause', payload));
+    socket.on('player:seek', (payload = {}) => apply('seek', payload));
+    socket.on('player:rate', (payload = {}) => apply('rate', payload));
+    socket.on('player:wait', () => {
+      const snapshot = room.apply('wait', {}, nickname);
+      if (snapshot) {
+        io.emit('room:state', snapshot);
+        io.emit('room:wait', { nickname });
+      }
+    });
+
+    socket.on('disconnect', () => {
+      const current = participants.get(participantId);
+      if (!current) return;
+      current.sockets.delete(socket.id);
+      current.buffering.delete(socket.id);
+      if (!current.sockets.size) participants.delete(participantId);
+      broadcastPresence();
+    });
   });
 
   const publicDir = path.join(process.cwd(), 'public');
-  app.use('/vendor/hls', express.static(path.join(process.cwd(), 'node_modules', 'hls.js', 'dist'), { immutable: true, maxAge: '7d' }));
   app.get(['/', '/index.html'], (_req, res) => {
     res.set('Cache-Control', 'no-store');
     res.sendFile(path.join(publicDir, 'index.html'));
   });
   app.use(express.static(publicDir, {
-    maxAge: 0,
     etag: true,
+    maxAge: 0,
     setHeaders(res, filePath) {
-      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
-      else res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Cache-Control', filePath.endsWith('.html') ? 'no-store' : 'no-cache');
     },
   }));
   app.get('*', (_req, res) => {
@@ -241,26 +245,19 @@ async function main() {
   });
 
   app.use((error, _req, res, _next) => {
-    const status = error instanceof OpenListError ? error.status : 500;
-    console.error('[http]', error);
+    const status = error instanceof WebDavError ? error.status : Number(error.status || 500);
+    if (status >= 500) console.error('[http]', error);
     res.status(status).json({ ok: false, error: error.message || '服务器错误' });
   });
 
-  const server = http.createServer(app);
-  const io = new Server(server, { transports: ['websocket', 'polling'], serveClient: true, maxHttpBufferSize: 100_000 });
-  io.engine.use(sessionMiddleware);
-  io.use((socket, next) => socket.request.session?.authenticated ? next() : next(new Error('unauthorized')));
-  new RoomManager({ io, store, defaultRoom: config.defaultRoom, maxRoomUsers: config.maxRoomUsers }).start();
-
   server.listen(config.port, config.host, () => {
-    console.log(`[TogetherVideo] listening on ${config.host}:${config.port}`);
-    console.log(`[TogetherVideo] OpenList: ${config.openlist.baseUrl}, media root: ${openlist.root}`);
-    console.log('[TogetherVideo] media mode: original download by default; compat streaming is resolved per client');
-    console.log('[TogetherVideo] resolved links are cached briefly; video bytes are never proxied by this app');
-    if (!settings.publicSettings().passwordChanged) {
-      console.warn('[TogetherVideo] first login password is "change-me"; change it in Settings immediately.');
-    }
+    console.log(`[TogetherVideo 2.0] listening on ${config.host}:${config.port}`);
+    console.log('[TogetherVideo 2.0] fixed two-person room; no room codes');
+    console.log('[TogetherVideo 2.0] media bytes are never proxied by this server');
   });
 }
 
-main().catch((error) => { console.error(error); process.exit(1); });
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

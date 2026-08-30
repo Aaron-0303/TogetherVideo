@@ -1,49 +1,21 @@
 const $ = (id) => document.getElementById(id);
 
 const ui = {
-  loginLayer: $('loginLayer'), app: $('app'), loginForm: $('loginForm'), nicknameInput: $('nicknameInput'),
-  passwordInput: $('passwordInput'), loginError: $('loginError'), firstRunHint: $('firstRunHint'),
-  connectionBadge: $('connectionBadge'), logoutBtn: $('logoutBtn'), settingsBtn: $('settingsBtn'),
-  copyRoomBtn: $('copyRoomBtn'), roomCodeText: $('roomCodeText'), members: $('members'), onlineCount: $('onlineCount'),
-  libraryList: $('libraryList'), libraryStatus: $('libraryStatus'), breadcrumbs: $('breadcrumbs'),
-  refreshLibraryBtn: $('refreshLibraryBtn'), video: $('video'), emptyPlayer: $('emptyPlayer'),
-  resumeOverlay: $('resumeOverlay'), mediaTitle: $('mediaTitle'), driftBadge: $('driftBadge'),
-  playerNotice: $('playerNotice'), syncNowBtn: $('syncNowBtn'), compatModeBtn: $('compatModeBtn'),
-  reactionLayer: $('reactionLayer'), chatMessages: $('chatMessages'), chatForm: $('chatForm'), chatInput: $('chatInput'),
-  settingsModal: $('settingsModal'), closeSettingsBtn: $('closeSettingsBtn'), openlistSetupBadge: $('openlistSetupBadge'),
-  openlistSetupText: $('openlistSetupText'), quarkSetupBadge: $('quarkSetupBadge'), quarkSetupText: $('quarkSetupText'),
-  qrWrap: $('qrWrap'), quarkQr: $('quarkQr'), startQuarkBtn: $('startQuarkBtn'), finishQuarkBtn: $('finishQuarkBtn'),
-  resetQuarkBtn: $('resetQuarkBtn'), mediaRootInput: $('mediaRootInput'), saveMediaRootBtn: $('saveMediaRootBtn'),
-  newSitePasswordInput: $('newSitePasswordInput'), savePasswordBtn: $('savePasswordBtn'), setupNotice: $('setupNotice'),
+  loginLayer: $('loginLayer'), loginForm: $('loginForm'), nicknameInput: $('nicknameInput'), passwordInput: $('passwordInput'), loginError: $('loginError'),
+  app: $('app'), socketBadge: $('socketBadge'), onlineBadge: $('onlineBadge'), logoutBtn: $('logoutBtn'), settingsBtn: $('settingsBtn'),
+  libraryToggle: $('libraryToggle'), closeLibraryBtn: $('closeLibraryBtn'), libraryPanel: $('libraryPanel'), breadcrumbs: $('breadcrumbs'), libraryStatus: $('libraryStatus'), libraryList: $('libraryList'), refreshLibraryBtn: $('refreshLibraryBtn'),
+  video: $('video'), emptyPlayer: $('emptyPlayer'), resumeOverlay: $('resumeOverlay'), mediaTitle: $('mediaTitle'), syncBadge: $('syncBadge'), playerNotice: $('playerNotice'),
+  waitBtn: $('waitBtn'), syncNowBtn: $('syncNowBtn'), rateSelect: $('rateSelect'), selfStatus: $('selfStatus'), selfBuffering: $('selfBuffering'), peerStatus: $('peerStatus'), peerBuffering: $('peerBuffering'), peerDot: $('peerDot'),
+  settingsModal: $('settingsModal'), closeSettingsBtn: $('closeSettingsBtn'), webdavUrl: $('webdavUrl'), webdavUsername: $('webdavUsername'), webdavPassword: $('webdavPassword'), webdavRoot: $('webdavRoot'), testWebdavBtn: $('testWebdavBtn'), saveWebdavBtn: $('saveWebdavBtn'), newSitePassword: $('newSitePassword'), saveSitePasswordBtn: $('saveSitePasswordBtn'), settingsNotice: $('settingsNotice'), toast: $('toast'),
 };
 
 const state = {
-  nickname: '',
-  room: '',
-  socket: null,
-  mediaPath: '',
-  mediaName: '',
-  mediaVersion: 0,
-  libraryPath: '',
-  librarySeq: 0,
-  hls: null,
-  lastServerState: null,
-  syncTimer: null,
-  setup: null,
-  loadSeq: 0,
-  sourceLoading: false,
-  mediaReady: false,
-  buffering: false,
-  lastBufferAt: 0,
-  lastSeekActivityAt: 0,
-  lastHardSeekAt: 0,
-  forceSyncOnce: false,
-  compatMode: localStorage.getItem('together_play_mode') === 'compat',
-  expectedSeq: 0,
-  expected: { play: [], pause: [], seek: [], rate: [] },
-  rateCorrectionTimer: null,
-  rateCorrectionBase: 1,
-  rateCorrectionDirection: 0,
+  nickname: '', participantId: '', socket: null, settings: null,
+  libraryPath: '', librarySeq: 0,
+  mediaPath: '', mediaVersion: 0, sourceLoading: false, mediaReady: false, loadSeq: 0,
+  lastSnapshot: null, halfRttMs: 0, buffering: false, bufferTimer: null,
+  expectedPlayUntil: 0, expectedPauseUntil: 0, expectedSeek: null, expectedRate: null,
+  correctionTimer: null, correctionToken: 0, lastHardSeekAt: 0, syncTimer: null, lastPeerName: '',
 };
 
 async function api(url, options = {}) {
@@ -54,169 +26,70 @@ async function api(url, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (response.status === 401 && url !== '/api/login') {
     showLogin();
-    throw new Error(data.error || '请先登录');
+    throw new Error(data.error || '登录已失效');
   }
   if (!response.ok || data.ok === false) throw new Error(data.error || `请求失败 (${response.status})`);
   return data;
 }
 
 function showLogin() {
+  state.socket?.disconnect();
+  clearInterval(state.syncTimer);
   ui.loginLayer.classList.remove('hidden');
   ui.app.classList.add('hidden');
   ui.settingsModal.classList.add('hidden');
 }
-function showApp() { ui.loginLayer.classList.add('hidden'); ui.app.classList.remove('hidden'); }
-function setNotice(text = '') { ui.playerNotice.textContent = text; }
-function setSetupNotice(text = '', error = false) {
-  ui.setupNotice.textContent = text;
-  ui.setupNotice.classList.toggle('error-text', Boolean(error));
+
+function showApp() {
+  ui.loginLayer.classList.add('hidden');
+  ui.app.classList.remove('hidden');
 }
+
+function setNotice(text = '', error = false) {
+  ui.playerNotice.textContent = text;
+  ui.playerNotice.classList.toggle('error', Boolean(error));
+}
+
+function setSettingsNotice(text = '', error = false) {
+  ui.settingsNotice.textContent = text;
+  ui.settingsNotice.classList.toggle('error', Boolean(error));
+}
+
+function toast(text) {
+  ui.toast.textContent = text;
+  ui.toast.classList.remove('hidden');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => ui.toast.classList.add('hidden'), 2600);
+}
+
 function formatBytes(bytes) {
-  if (!bytes) return '';
+  const n = Number(bytes || 0);
+  if (!n) return '';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let n = bytes;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
-}
-function formatTime(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
-function encodePath(value) { return encodeURIComponent(value || ''); }
-function roomFromUrl() { return new URLSearchParams(location.search).get('room') || ''; }
-function normalizeRoom(room) { return String(room || 'ours').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'ours'; }
-function playMode() { return state.compatMode ? 'compat' : 'original'; }
-function desiredRoomRate() { return Number(state.lastServerState?.rate || 1); }
-
-function emitNow(event, payload, ack) {
-  if (!state.socket?.connected) return false;
-  if (typeof ack === 'function') state.socket.emit(event, payload, ack);
-  else state.socket.emit(event, payload);
-  return true;
-}
-
-function requestSync() {
-  return emitNow('sync:request');
-}
-
-function addExpected(type, value = null, ttl = 2000) {
-  const token = { id: ++state.expectedSeq, value, timer: null };
-  state.expected[type].push(token);
-  token.timer = setTimeout(() => removeExpected(type, token), ttl);
-  return token;
-}
-
-function removeExpected(type, token) {
-  const list = state.expected[type];
-  const index = list.indexOf(token);
-  if (index >= 0) list.splice(index, 1);
-  if (token?.timer) clearTimeout(token.timer);
-}
-
-function consumeExpected(type, value = null, tolerance = 0.1) {
-  const list = state.expected[type];
-  let index = -1;
-  if (value == null) index = list.length ? 0 : -1;
-  else index = list.findIndex((token) => token.value != null && Math.abs(Number(token.value) - Number(value)) <= tolerance);
-  if (index < 0) return false;
-  const [token] = list.splice(index, 1);
-  if (token.timer) clearTimeout(token.timer);
-  return true;
-}
-
-function clearExpectedEvents() {
-  for (const type of Object.keys(state.expected)) {
-    for (const token of state.expected[type]) if (token.timer) clearTimeout(token.timer);
-    state.expected[type] = [];
-  }
+  let value = n; let i = 0;
+  while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+  return `${value.toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
 }
 
 function mediaPayload(extra = {}) {
-  return {
-    mediaPath: state.mediaPath,
-    mediaVersion: state.mediaVersion,
-    ...extra,
-  };
+  return { mediaPath: state.mediaPath, mediaVersion: state.mediaVersion, ...extra };
 }
 
-async function programmaticPlay() {
-  if (!state.mediaReady || !ui.video.paused) return true;
-  const token = addExpected('play');
-  try {
-    await ui.video.play();
-    ui.resumeOverlay.classList.add('hidden');
-    return true;
-  } catch {
-    removeExpected('play', token);
-    ui.resumeOverlay.classList.remove('hidden');
+function emitControl(event, payload = {}) {
+  if (!state.socket?.connected) {
+    setNotice('连接已断开：本次操作不会排队，重连后会恢复服务器的最新状态。', true);
     return false;
   }
-}
-
-function programmaticPause() {
-  if (ui.video.paused) return;
-  addExpected('pause');
-  ui.video.pause();
-}
-
-function programmaticSeek(target) {
-  if (!state.mediaReady || ui.video.readyState < HTMLMediaElement.HAVE_METADATA) return false;
-  let value = Math.max(0, Number(target || 0));
-  if (Number.isFinite(ui.video.duration) && ui.video.duration > 0) value = Math.min(value, Math.max(0, ui.video.duration - 0.05));
-  if (Math.abs((ui.video.currentTime || 0) - value) < 0.05) return false;
-  addExpected('seek', value, 3000);
-  try {
-    ui.video.currentTime = value;
-    return true;
-  } catch {
-    consumeExpected('seek', value, 0.5);
-    return false;
-  }
-}
-
-function programmaticRate(rate) {
-  const value = Math.min(4, Math.max(0.25, Number(rate || 1)));
-  if (Math.abs(ui.video.playbackRate - value) < 0.005) return;
-  addExpected('rate', value, 1500);
-  ui.video.playbackRate = value;
-}
-
-function cancelRateCorrection(restoreRate = null) {
-  if (state.rateCorrectionTimer) clearTimeout(state.rateCorrectionTimer);
-  state.rateCorrectionTimer = null;
-  state.rateCorrectionDirection = 0;
-  if (restoreRate != null && state.mediaReady) programmaticRate(restoreRate);
-}
-
-function startRateCorrection(baseRate, direction, drift) {
-  if (state.rateCorrectionTimer && state.rateCorrectionDirection === direction && Math.abs(state.rateCorrectionBase - baseRate) < 0.005) return;
-  cancelRateCorrection();
-  state.rateCorrectionBase = baseRate;
-  state.rateCorrectionDirection = direction;
-  const delta = Math.min(0.08, Math.max(0.03, Number(drift || 0) * 0.015));
-  const corrected = Math.min(4, Math.max(0.25, baseRate + direction * delta));
-  programmaticRate(corrected);
-  state.rateCorrectionTimer = setTimeout(() => {
-    state.rateCorrectionTimer = null;
-    state.rateCorrectionDirection = 0;
-    if (state.mediaReady) programmaticRate(state.rateCorrectionBase);
-  }, 3000);
-}
-
-function updatePlayModeUI() {
-  if (!ui.compatModeBtn) return;
-  ui.compatModeBtn.textContent = state.compatMode ? '兼容播放：开' : '原画直链';
-  ui.compatModeBtn.classList.toggle('active-mode', state.compatMode);
-  ui.compatModeBtn.title = state.compatMode
-    ? '当前设备使用夸克转码兼容流。只影响这台设备。点击恢复原画直链。'
-    : '默认使用夸克原文件直链。若本设备黑屏或无法解码，可点击切换兼容播放。';
+  state.socket.emit(event, payload);
+  return true;
 }
 
 async function bootstrap() {
-  updatePlayModeUI();
-  const session = await api('/api/session').catch(() => ({ authenticated: false, passwordChanged: true }));
-  ui.firstRunHint.classList.toggle('hidden', session.passwordChanged !== false);
+  const session = await api('/api/session').catch(() => ({ authenticated: false }));
   if (!session.authenticated) return showLogin();
   state.nickname = session.nickname;
-  state.room = roomFromUrl() || localStorage.getItem('together_room') || session.defaultRoom || 'ours';
+  state.participantId = session.participantId;
+  state.settings = session.settings;
   startApp();
 }
 
@@ -229,563 +102,467 @@ ui.loginForm.addEventListener('submit', async (event) => {
       body: JSON.stringify({ nickname: ui.nicknameInput.value, password: ui.passwordInput.value }),
     });
     state.nickname = result.nickname;
-    state.room = normalizeRoom(roomFromUrl() || localStorage.getItem('together_room') || result.defaultRoom);
-    ui.firstRunHint.classList.toggle('hidden', result.passwordChanged !== false);
+    state.participantId = result.participantId;
+    state.settings = result.settings;
     startApp();
   } catch (error) { ui.loginError.textContent = error.message; }
 });
 
 ui.logoutBtn.addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST' }).catch(() => {});
-  state.socket?.disconnect();
   showLogin();
-});
-
-ui.copyRoomBtn.addEventListener('click', async () => {
-  try {
-    const url = new URL(location.href);
-    url.searchParams.set('room', state.room);
-    await navigator.clipboard.writeText(url.toString());
-    ui.copyRoomBtn.textContent = '已复制';
-    setTimeout(() => { ui.copyRoomBtn.textContent = '复制房间链接'; }, 1200);
-  } catch { setNotice('复制失败，请手动复制当前网址。'); }
-});
-
-ui.refreshLibraryBtn.addEventListener('click', () => loadLibrary(state.libraryPath));
-ui.syncNowBtn.addEventListener('click', () => {
-  if (!state.socket?.connected) return setNotice('当前正在重连，连接恢复后会自动同步。');
-  state.forceSyncOnce = true;
-  requestSync();
-});
-ui.compatModeBtn?.addEventListener('click', async () => {
-  state.compatMode = !state.compatMode;
-  localStorage.setItem('together_play_mode', state.compatMode ? 'compat' : 'original');
-  updatePlayModeUI();
-  if (!state.mediaPath) return;
-  setNotice(state.compatMode ? '正在为这台设备切换到兼容播放…' : '正在为这台设备恢复原画直链…');
-  await loadMedia(state.mediaPath, state.mediaName, state.mediaVersion);
 });
 
 function startApp() {
   showApp();
-  state.room = normalizeRoom(state.room);
-  localStorage.setItem('together_room', state.room);
-  ui.roomCodeText.textContent = state.room;
-  const url = new URL(location.href);
-  url.searchParams.set('room', state.room);
-  history.replaceState(null, '', url);
-  updatePlayModeUI();
   connectSocket();
+  applySettings(state.settings);
   loadLibrary('');
-  loadSetupStatus(true);
+  if (!state.settings?.webdav?.configured) openSettings();
 }
-
-ui.settingsBtn.addEventListener('click', () => { ui.settingsModal.classList.remove('hidden'); loadSetupStatus(false); });
-ui.closeSettingsBtn.addEventListener('click', () => ui.settingsModal.classList.add('hidden'));
-ui.settingsModal.addEventListener('click', (event) => { if (event.target === ui.settingsModal) ui.settingsModal.classList.add('hidden'); });
-
-async function loadSetupStatus(autoOpen = false) {
-  try {
-    const result = await api('/api/setup/status');
-    state.setup = result;
-    renderSetup(result);
-    if (autoOpen && result.firstRun) ui.settingsModal.classList.remove('hidden');
-  } catch (error) { if (!autoOpen) setSetupNotice(error.message, true); }
-}
-
-function renderSetup(result) {
-  const open = result.openlist || {};
-  ui.openlistSetupBadge.textContent = open.ready ? '已启动' : '异常';
-  ui.openlistSetupBadge.classList.toggle('online', Boolean(open.ready));
-  ui.openlistSetupText.textContent = open.ready
-    ? (open.adminError || 'OpenList 已由 TogetherVideo 自动启动，无需单独部署。')
-    : (open.bootstrapError || 'OpenList 尚未启动。请查看部署日志。');
-
-  const q = result.quark || {};
-  ui.quarkSetupBadge.textContent = q.ready ? '已授权' : q.qr ? '等待扫码' : q.exists ? '未完成' : '未配置';
-  ui.quarkSetupBadge.classList.toggle('online', Boolean(q.ready));
-  ui.quarkSetupText.textContent = q.ready
-    ? `QuarkTV 已连接${q.mountPath ? `，挂载在 ${q.mountPath}` : ''}。默认播放使用原画直链。`
-    : q.qr ? '二维码已生成，请扫码确认。' : q.exists ? (q.status || '授权尚未完成。') : '尚未添加 QuarkTV。';
-  ui.qrWrap.classList.toggle('hidden', !q.qr);
-  if (q.qr) ui.quarkQr.src = q.qr; else ui.quarkQr.removeAttribute('src');
-  ui.startQuarkBtn.classList.toggle('hidden', q.ready || Boolean(q.qr));
-  ui.finishQuarkBtn.classList.toggle('hidden', !q.qr);
-  ui.resetQuarkBtn.classList.toggle('hidden', q.ready || !q.exists);
-  ui.mediaRootInput.value = result.settings?.mediaRoot || '/QuarkTV';
-}
-
-ui.startQuarkBtn.addEventListener('click', async () => {
-  setSetupNotice('正在生成夸克登录二维码...');
-  ui.startQuarkBtn.disabled = true;
-  try {
-    await api('/api/setup/quark/start', { method: 'POST' });
-    await loadSetupStatus(false);
-    setSetupNotice('二维码已生成，请用夸克 App 扫码。');
-  } catch (error) { setSetupNotice(error.message, true); }
-  finally { ui.startQuarkBtn.disabled = false; }
-});
-
-ui.finishQuarkBtn.addEventListener('click', async () => {
-  setSetupNotice('正在确认扫码并获取夸克授权...');
-  ui.finishQuarkBtn.disabled = true;
-  try {
-    const result = await api('/api/setup/quark/finish', { method: 'POST' });
-    await loadSetupStatus(false);
-    if (result.quark?.ready) { setSetupNotice('夸克授权成功，可以读取片库了。'); loadLibrary(''); }
-    else setSetupNotice('暂未检测到授权。请确认手机端已同意，或重新生成二维码。', true);
-  } catch (error) { setSetupNotice(error.message, true); }
-  finally { ui.finishQuarkBtn.disabled = false; }
-});
-
-ui.resetQuarkBtn.addEventListener('click', async () => {
-  setSetupNotice('正在重新生成二维码...');
-  ui.resetQuarkBtn.disabled = true;
-  try {
-    await api('/api/setup/quark/reset', { method: 'POST' });
-    await loadSetupStatus(false);
-    setSetupNotice('新二维码已生成。');
-  } catch (error) { setSetupNotice(error.message, true); }
-  finally { ui.resetQuarkBtn.disabled = false; }
-});
-
-ui.saveMediaRootBtn.addEventListener('click', async () => {
-  const mediaRoot = ui.mediaRootInput.value.trim() || '/QuarkTV';
-  setSetupNotice('正在保存片库目录...');
-  try {
-    const result = await api('/api/settings', { method: 'POST', body: JSON.stringify({ mediaRoot }) });
-    ui.mediaRootInput.value = result.settings.mediaRoot;
-    state.libraryPath = '';
-    await loadLibrary('');
-    setSetupNotice(`片库目录已切换到 ${result.settings.mediaRoot}`);
-  } catch (error) { setSetupNotice(error.message, true); }
-});
-
-ui.savePasswordBtn.addEventListener('click', async () => {
-  const newPassword = ui.newSitePasswordInput.value;
-  if (!newPassword) return setSetupNotice('请输入新访问密码。', true);
-  try {
-    await api('/api/settings', { method: 'POST', body: JSON.stringify({ newPassword }) });
-    ui.newSitePasswordInput.value = '';
-    ui.firstRunHint.classList.add('hidden');
-    setSetupNotice('网站访问密码已修改。');
-  } catch (error) { setSetupNotice(error.message, true); }
-});
 
 function connectSocket() {
   state.socket?.disconnect();
-  const socket = io({ transports: ['websocket', 'polling'] });
+  const socket = io({ transports: ['websocket', 'polling'], reconnection: true });
   state.socket = socket;
+
   socket.on('connect', () => {
-    ui.connectionBadge.textContent = '已连接';
-    ui.connectionBadge.classList.add('online');
-    socket.emit('room:join', { room: state.room, nickname: state.nickname }, (result) => {
-      if (!result?.ok) setNotice(result?.error || '加入房间失败');
-    });
+    ui.socketBadge.textContent = '已连接';
+    ui.socketBadge.classList.add('online');
+    setNotice('');
+    requestSync(true);
   });
   socket.on('disconnect', () => {
-    ui.connectionBadge.textContent = '重连中';
-    ui.connectionBadge.classList.remove('online');
-    cancelRateCorrection(desiredRoomRate());
+    ui.socketBadge.textContent = '重连中';
+    ui.socketBadge.classList.remove('online');
   });
   socket.on('connect_error', (error) => {
-    ui.connectionBadge.textContent = '连接失败';
-    setNotice(error.message);
+    ui.socketBadge.textContent = '连接失败';
+    ui.socketBadge.classList.remove('online');
+    setNotice(`WebSocket：${error.message}`, true);
   });
-  socket.on('room:snapshot', (snapshot) => {
-    renderMembers(snapshot.members || []);
-    renderMessages(snapshot.messages || []);
-    applyServerState(snapshot, true);
-  });
-  socket.on('room:members', renderMembers);
-  socket.on('player:state', (snapshot) => applyServerState(snapshot, false));
-  socket.on('chat:message', appendMessage);
-  socket.on('reaction:show', showReaction);
+  socket.on('room:full', (payload) => setNotice(payload?.message || '当前已有两个人在线', true));
+  socket.on('room:snapshot', (snapshot) => applySnapshot(snapshot, true));
+  socket.on('room:state', (snapshot) => applySnapshot(snapshot, false));
+  socket.on('presence:update', renderPresence);
+  socket.on('room:wait', (payload) => toast(`${payload?.nickname || '对方'}：等等我`));
+
   clearInterval(state.syncTimer);
-  state.syncTimer = setInterval(() => {
-    if (socket.connected && state.mediaPath) requestSync();
-  }, 5000);
+  state.syncTimer = setInterval(() => requestSync(false), 4000);
 }
 
-function renderMembers(members) {
-  ui.members.replaceChildren();
-  for (const member of members) {
-    const el = document.createElement('span');
-    el.className = 'member-pill';
-    el.textContent = member.nickname;
-    ui.members.appendChild(el);
-  }
-  ui.onlineCount.textContent = `${members.length} 在线`;
+function requestSync(force = false) {
+  const socket = state.socket;
+  if (!socket?.connected) return;
+  const started = performance.now();
+  socket.timeout(2500).emit('sync:request', (error, snapshot) => {
+    if (error || !snapshot) return;
+    const rtt = performance.now() - started;
+    state.halfRttMs = Math.min(1000, Math.max(0, rtt / 2));
+    applySnapshot(snapshot, force);
+  });
+}
+
+function renderPresence(payload = {}) {
+  const participants = Array.isArray(payload.participants) ? payload.participants : [];
+  ui.onlineBadge.textContent = `${participants.length} / 2 在线`;
+  ui.onlineBadge.classList.toggle('online', participants.length >= 2);
+  const self = participants.find((item) => item.id === state.participantId);
+  const peer = participants.find((item) => item.id !== state.participantId);
+  ui.selfStatus.textContent = self ? '在线' : '重连中';
+  ui.selfBuffering.textContent = state.buffering ? '正在缓冲' : '播放就绪';
+  if (peer) state.lastPeerName = peer.nickname;
+  ui.peerStatus.textContent = peer ? `${peer.nickname} · 在线` : (state.lastPeerName ? `${state.lastPeerName} · 离线` : '离线');
+  ui.peerBuffering.textContent = peer ? (peer.buffering ? '对方正在缓冲' : '播放就绪') : '等待上线';
+  ui.peerDot.className = `status-dot${peer ? (peer.buffering ? ' buffering' : ' online') : ''}`;
 }
 
 async function loadLibrary(relativePath = '') {
   const seq = ++state.librarySeq;
   state.libraryPath = relativePath;
-  ui.libraryStatus.textContent = '正在读取片库...';
-  ui.libraryList.replaceChildren();
   renderBreadcrumbs(relativePath);
+  ui.libraryStatus.textContent = '正在读取 WebDAV...';
+  ui.libraryList.replaceChildren();
   try {
-    const result = await api(`/api/library?path=${encodePath(relativePath)}`);
+    const result = await api(`/api/library?path=${encodeURIComponent(relativePath)}`);
     if (seq !== state.librarySeq) return;
-    ui.libraryStatus.textContent = result.items.length ? `${result.items.length} 项` : '这里还没有可播放内容';
+    ui.libraryStatus.textContent = result.items.length ? `${result.items.length} 项` : '这里没有可播放视频';
     for (const item of result.items) ui.libraryList.appendChild(renderLibraryItem(item));
   } catch (error) {
     if (seq !== state.librarySeq) return;
     ui.libraryStatus.textContent = error.message;
-    if (/OpenList|Quark|storage|挂载|对象/.test(error.message)) loadSetupStatus(false);
+    if (/WebDAV|配置|认证/.test(error.message)) openSettings();
   }
-}
-
-function renderLibraryItem(item) {
-  const button = document.createElement('button');
-  button.className = `library-item${item.relativePath === state.mediaPath ? ' active' : ''}`;
-  button.dataset.path = item.relativePath;
-  const ext = item.isDir ? '' : item.name.split('.').pop()?.toUpperCase();
-  button.innerHTML = `<span class="file-icon">${item.isDir ? '▰' : '▶'}</span><span><strong title=""></strong><small></small></span><small>${item.isDir ? '›' : ext || ''}</small>`;
-  button.querySelector('strong').textContent = item.name;
-  button.querySelector('strong').title = item.name;
-  button.querySelector('span small').textContent = item.isDir ? '文件夹' : formatBytes(item.size);
-  button.addEventListener('click', () => item.isDir ? loadLibrary(item.relativePath) : selectMedia(item));
-  return button;
 }
 
 function renderBreadcrumbs(relativePath) {
   ui.breadcrumbs.replaceChildren();
-  const parts = relativePath ? relativePath.split('/') : [];
   const crumbs = [{ label: '根目录', path: '' }];
+  const parts = relativePath ? relativePath.split('/') : [];
   let current = '';
   for (const part of parts) {
     current = current ? `${current}/${part}` : part;
     crumbs.push({ label: part, path: current });
   }
-  crumbs.forEach((crumb, index) => {
+  for (const crumb of crumbs) {
     const button = document.createElement('button');
-    button.textContent = `${index ? '/ ' : ''}${crumb.label}`;
+    button.type = 'button';
+    button.textContent = crumb.label;
     button.addEventListener('click', () => loadLibrary(crumb.path));
     ui.breadcrumbs.appendChild(button);
-  });
-}
-
-function selectMedia(item) {
-  if (!emitNow('player:media', { mediaPath: item.relativePath, mediaName: item.name })) {
-    setNotice('当前正在重连，暂时不能切换剧集。');
   }
 }
 
-async function loadMedia(mediaPath, mediaName, mediaVersion) {
-  if (!mediaPath) return;
+function renderLibraryItem(item) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `library-item${!item.isDir && item.path === state.mediaPath ? ' active' : ''}`;
+  const icon = document.createElement('span');
+  icon.className = 'file-icon';
+  icon.textContent = item.isDir ? '▰' : '▶';
+  const info = document.createElement('span');
+  const strong = document.createElement('strong');
+  strong.textContent = item.name;
+  strong.title = item.name;
+  const small = document.createElement('small');
+  small.textContent = item.isDir ? '文件夹' : (formatBytes(item.size) || '视频');
+  info.append(strong, small);
+  const tail = document.createElement('small');
+  tail.textContent = item.isDir ? '›' : (item.name.split('.').pop()?.toUpperCase() || '');
+  button.append(icon, info, tail);
+  button.addEventListener('click', () => {
+    if (item.isDir) return loadLibrary(item.path);
+    if (emitControl('media:select', { mediaPath: item.path, mediaName: item.name })) ui.libraryPanel.classList.remove('open');
+  });
+  return button;
+}
+
+ui.refreshLibraryBtn.addEventListener('click', () => loadLibrary(state.libraryPath));
+ui.libraryToggle.addEventListener('click', () => ui.libraryPanel.classList.add('open'));
+ui.closeLibraryBtn.addEventListener('click', () => ui.libraryPanel.classList.remove('open'));
+
+function clearCorrection(restore = true) {
+  clearTimeout(state.correctionTimer);
+  state.correctionTimer = null;
+  state.correctionToken++;
+  if (restore && state.lastSnapshot && state.mediaReady) setProgrammaticRate(Number(state.lastSnapshot.rate || 1));
+}
+
+function setProgrammaticRate(rate) {
+  const value = Math.min(4, Math.max(0.25, Number(rate || 1)));
+  if (Math.abs(ui.video.playbackRate - value) < 0.001) return;
+  state.expectedRate = { value, until: Date.now() + 1200 };
+  ui.video.playbackRate = value;
+  ui.rateSelect.value = String(Number(state.lastSnapshot?.rate || value));
+}
+
+function setProgrammaticSeek(target) {
+  if (!Number.isFinite(target)) return;
+  state.expectedSeek = { target, until: Date.now() + 1500 };
+  try { ui.video.currentTime = Math.max(0, target); state.lastHardSeekAt = Date.now(); } catch {}
+}
+
+function setProgrammaticPause() {
+  if (ui.video.paused) return;
+  state.expectedPauseUntil = Date.now() + 1200;
+  ui.video.pause();
+}
+
+function setProgrammaticPlay() {
+  if (!ui.video.paused) return;
+  state.expectedPlayUntil = Date.now() + 1500;
+  ui.video.play()
+    .then(() => ui.resumeOverlay.classList.add('hidden'))
+    .catch(() => {
+      state.expectedPlayUntil = 0;
+      ui.resumeOverlay.classList.remove('hidden');
+    });
+}
+
+function targetPosition(snapshot) {
+  const base = Math.max(0, Number(snapshot.position || 0));
+  if (!snapshot.playing) return base;
+  return base + state.halfRttMs / 1000 * Number(snapshot.rate || 1);
+}
+
+function applySnapshot(snapshot, force = false) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  state.lastSnapshot = snapshot;
+  if (!snapshot.media) {
+    if (state.mediaPath) clearMedia();
+    return;
+  }
+  const changed = snapshot.media.path !== state.mediaPath || Number(snapshot.mediaVersion) !== state.mediaVersion;
+  if (changed) {
+    loadMedia(snapshot);
+    return;
+  }
+  if (state.sourceLoading || !state.mediaReady) return;
+  applyPlayback(snapshot, force);
+}
+
+function loadMedia(snapshot) {
   const seq = ++state.loadSeq;
+  state.mediaPath = snapshot.media.path;
+  state.mediaVersion = Number(snapshot.mediaVersion || 0);
   state.sourceLoading = true;
   state.mediaReady = false;
   state.buffering = false;
-  state.mediaPath = mediaPath;
-  state.mediaName = mediaName || mediaPath.split('/').pop();
-  state.mediaVersion = Number(mediaVersion || 0);
-  state.forceSyncOnce = false;
-  ui.mediaTitle.textContent = state.mediaName;
+  clearCorrection(false);
+  setBuffering(false);
+  ui.mediaTitle.textContent = snapshot.media.name || snapshot.media.path.split('/').pop();
   ui.emptyPlayer.classList.add('hidden');
   ui.resumeOverlay.classList.add('hidden');
-  setNotice(state.compatMode ? '正在获取夸克兼容播放地址…' : '正在获取夸克原画直链…');
-  cancelRateCorrection();
-  clearExpectedEvents();
+  ui.syncBadge.textContent = '正在加载';
+  ui.syncBadge.classList.remove('good');
+  setNotice('正在从 WebDAV 获取视频直链…');
 
-  state.hls?.destroy();
-  state.hls = null;
   ui.video.pause();
   ui.video.removeAttribute('src');
   ui.video.load();
+  ui.video.src = `/api/media?path=${encodeURIComponent(state.mediaPath)}&v=${state.mediaVersion}`;
+  ui.video.load();
 
-  try {
-    const info = await api(`/api/play-info?path=${encodePath(mediaPath)}&mode=${playMode()}`);
-    if (seq !== state.loadSeq) return;
-    const delivery = info.delivery || (info.extension === '.m3u8' ? 'hls' : 'file');
-
-    if (delivery === 'hls') {
-      if (window.Hls?.isSupported()) {
-        state.hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          backBufferLength: 60,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
-        });
-        state.hls.loadSource(info.playUrl);
-        state.hls.attachMedia(ui.video);
-        state.hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal) return;
-          state.sourceLoading = false;
-          state.mediaReady = false;
-          setNotice('兼容流 HLS 加载失败，可能是夸克 CDN 跨域限制。请恢复“原画直链”或更换浏览器。');
-        });
-      } else if (ui.video.canPlayType('application/vnd.apple.mpegurl')) {
-        ui.video.src = info.playUrl;
-        ui.video.load();
-      } else {
-        state.sourceLoading = false;
-        setNotice('当前浏览器不支持这个兼容视频流，请恢复“原画直链”或使用 Chrome / Edge / Safari。');
-        return;
-      }
-    } else {
-      ui.video.src = info.playUrl;
-      ui.video.load();
-    }
-
-    if (['.mkv', '.ts'].includes(info.extension) && !state.compatMode) {
-      setNotice('该格式可能无法原画播放；若黑屏可切换“兼容播放”。');
-    }
-    refreshActiveLibraryItem();
-  } catch (error) {
+  const onReady = () => {
     if (seq !== state.loadSeq) return;
     state.sourceLoading = false;
-    state.mediaReady = false;
-    setNotice(error.message);
+    state.mediaReady = true;
+    setNotice('');
+    ui.video.removeEventListener('loadedmetadata', onReady);
+    requestSync(true);
+    refreshActiveLibraryItem();
+  };
+  ui.video.addEventListener('loadedmetadata', onReady);
+}
+
+function clearMedia() {
+  state.loadSeq++;
+  state.mediaPath = '';
+  state.mediaVersion = Number(state.lastSnapshot?.mediaVersion || state.mediaVersion + 1);
+  state.sourceLoading = false;
+  state.mediaReady = false;
+  clearCorrection(false);
+  setBuffering(false);
+  ui.video.pause();
+  ui.video.removeAttribute('src');
+  ui.video.load();
+  ui.mediaTitle.textContent = '选择一个视频开始';
+  ui.emptyPlayer.classList.remove('hidden');
+  ui.syncBadge.textContent = '等待视频';
+  ui.syncBadge.classList.remove('good');
+  setNotice('');
+}
+
+function applyPlayback(snapshot, force = false) {
+  if (!state.mediaReady || snapshot.media?.path !== state.mediaPath || Number(snapshot.mediaVersion) !== state.mediaVersion) return;
+  const desiredRate = Number(snapshot.rate || 1);
+  const target = targetPosition(snapshot);
+  const current = Number(ui.video.currentTime || 0);
+  const drift = current - target;
+  const absDrift = Math.abs(drift);
+
+  if (force && !state.buffering) {
+    clearCorrection(false);
+    if (absDrift > 0.18) setProgrammaticSeek(target);
+  } else if (!state.buffering && absDrift > 1.8 && Date.now() - state.lastHardSeekAt > 6000) {
+    clearCorrection(false);
+    setProgrammaticSeek(target);
+  } else if (!state.buffering && snapshot.playing && absDrift > 0.35) {
+    const adjust = Math.min(0.06, Math.max(0.02, absDrift * 0.03));
+    const corrected = drift < 0 ? desiredRate + adjust : desiredRate - adjust;
+    const token = ++state.correctionToken;
+    setProgrammaticRate(corrected);
+    clearTimeout(state.correctionTimer);
+    state.correctionTimer = setTimeout(() => {
+      if (token !== state.correctionToken) return;
+      state.correctionTimer = null;
+      setProgrammaticRate(Number(state.lastSnapshot?.rate || desiredRate));
+    }, 1800);
+  } else if (!state.correctionTimer) {
+    setProgrammaticRate(desiredRate);
   }
+
+  ui.rateSelect.value = String(desiredRate);
+  ui.syncBadge.textContent = absDrift <= 0.25 ? '已对轴' : state.buffering ? `缓冲中 · 差 ${absDrift.toFixed(1)}s` : `校准 ${absDrift.toFixed(1)}s`;
+  ui.syncBadge.classList.toggle('good', absDrift <= 0.25 && !state.buffering);
+
+  if (snapshot.playing) setProgrammaticPlay();
+  else setProgrammaticPause();
 }
 
 function refreshActiveLibraryItem() {
-  document.querySelectorAll('.library-item').forEach((el) => {
-    el.classList.toggle('active', el.dataset.path === state.mediaPath);
-  });
-}
-
-function applyServerState(snapshot, initial) {
-  state.lastServerState = snapshot;
-  const incomingVersion = Number(snapshot.mediaVersion || 0);
-  const changedMedia = snapshot.mediaPath && (
-    snapshot.mediaPath !== state.mediaPath || incomingVersion !== state.mediaVersion
-  );
-
-  if (changedMedia) {
-    loadMedia(snapshot.mediaPath, snapshot.mediaName, incomingVersion).catch((error) => setNotice(error.message));
-    return;
-  }
-  if (!snapshot.mediaPath || snapshot.mediaPath !== state.mediaPath) return;
-  if (state.sourceLoading || !state.mediaReady) return;
-  applyPlayback(snapshot, initial);
-}
-
-function applyPlayback(snapshot, initial = false) {
-  if (!snapshot.mediaPath || snapshot.mediaPath !== state.mediaPath) return;
-  if (Number(snapshot.mediaVersion || 0) !== state.mediaVersion) return;
-  if (!state.mediaReady || state.sourceLoading || ui.video.readyState < HTMLMediaElement.HAVE_METADATA) return;
-
-  const desiredRate = Math.min(4, Math.max(0.25, Number(snapshot.rate || 1)));
-  if (state.rateCorrectionTimer && Math.abs(state.rateCorrectionBase - desiredRate) > 0.005) {
-    cancelRateCorrection(desiredRate);
-  } else if (!state.rateCorrectionTimer && Math.abs(ui.video.playbackRate - desiredRate) > 0.01) {
-    programmaticRate(desiredRate);
-  }
-
-  let target = Math.max(0, Number(snapshot.position || 0));
-  if (Number.isFinite(ui.video.duration) && ui.video.duration > 0) {
-    target = Math.min(target, Math.max(0, ui.video.duration - 0.05));
-  }
-  const drift = Math.abs((ui.video.currentTime || 0) - target);
-  ui.driftBadge.textContent = drift < 0.35 ? '已同步' : `偏差 ${drift.toFixed(1)}s`;
-
-  const now = Date.now();
-  const recentlyBuffered = now - state.lastBufferAt < 8000;
-  const canSoftCorrect = !state.buffering && !ui.video.seeking && ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
-  const canHardCorrect = !state.buffering && !ui.video.seeking && ui.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
-  const forceHard = state.forceSyncOnce;
-
-  if (initial || forceHard) {
-    state.forceSyncOnce = false;
-    cancelRateCorrection(desiredRate);
-    if (drift > 0.2 && programmaticSeek(target)) state.lastHardSeekAt = now;
-  } else if (drift > 3 && canHardCorrect && !recentlyBuffered && now - state.lastHardSeekAt > 5000) {
-    cancelRateCorrection(desiredRate);
-    if (programmaticSeek(target)) state.lastHardSeekAt = now;
-  } else if (drift > 0.45 && snapshot.playing && canSoftCorrect) {
-    const direction = ui.video.currentTime < target ? 1 : -1;
-    // A client that has just buffered needs time to refill its buffer. Speeding it up
-    // immediately can cause a buffer -> catch-up -> buffer loop, so only slow down an
-    // ahead client during the recovery window.
-    if (!recentlyBuffered || direction < 0) startRateCorrection(desiredRate, direction, drift);
-  } else if (drift < 0.25 && state.rateCorrectionTimer) {
-    cancelRateCorrection(desiredRate);
-  }
-
-  if (snapshot.playing) {
-    if (ui.video.paused) programmaticPlay();
-  } else {
-    cancelRateCorrection(desiredRate);
-    if (!ui.video.paused) programmaticPause();
+  for (const item of document.querySelectorAll('.library-item')) item.classList.remove('active');
+  for (const strong of document.querySelectorAll('.library-item strong')) {
+    if (strong.textContent === ui.mediaTitle.textContent) strong.closest('.library-item')?.classList.add('active');
   }
 }
-
-ui.resumeOverlay.addEventListener('click', () => {
-  ui.resumeOverlay.classList.add('hidden');
-  programmaticPlay();
-});
 
 ui.video.addEventListener('play', () => {
-  if (state.sourceLoading || !state.mediaReady) return;
-  if (consumeExpected('play')) return;
-  if (state.lastServerState?.playing) {
-    requestSync();
-    return;
-  }
-  if (!state.socket?.connected) return setNotice('当前正在重连，播放状态不会发送给对方。');
-  state.lastServerState = { ...(state.lastServerState || {}), playing: true, position: ui.video.currentTime };
-  emitNow('player:play', mediaPayload({ position: ui.video.currentTime }));
+  if (state.sourceLoading) return;
+  if (Date.now() <= state.expectedPlayUntil) { state.expectedPlayUntil = 0; return; }
+  emitControl('player:play', mediaPayload({ position: ui.video.currentTime }));
 });
 
 ui.video.addEventListener('pause', () => {
-  if (state.sourceLoading || !state.mediaReady) return;
-  if (consumeExpected('pause')) return;
-  if (ui.video.ended || document.hidden || ui.video.seeking) return;
-  if (Date.now() - state.lastSeekActivityAt < 300) return;
-  if (state.lastServerState && !state.lastServerState.playing) return;
-  if (!state.socket?.connected) return setNotice('当前正在重连，暂停状态不会发送给对方。');
-  state.lastServerState = { ...(state.lastServerState || {}), playing: false, position: ui.video.currentTime };
-  emitNow('player:pause', mediaPayload({ position: ui.video.currentTime }));
-});
-
-ui.video.addEventListener('seeking', () => {
-  if (!state.sourceLoading && state.mediaReady) state.lastSeekActivityAt = Date.now();
+  if (state.sourceLoading) return;
+  if (Date.now() <= state.expectedPauseUntil) { state.expectedPauseUntil = 0; return; }
+  if (ui.video.ended || !state.mediaPath) return;
+  emitControl('player:pause', mediaPayload({ position: ui.video.currentTime }));
 });
 
 ui.video.addEventListener('seeked', () => {
-  if (state.sourceLoading || !state.mediaReady) return;
-  state.lastSeekActivityAt = Date.now();
-  if (consumeExpected('seek', ui.video.currentTime, 0.4)) return;
-  cancelRateCorrection(desiredRoomRate());
-  if (!emitNow('player:seek', mediaPayload({ position: ui.video.currentTime }))) {
-    setNotice('当前正在重连，本次拖动不会同步给对方。');
+  if (state.sourceLoading || !state.mediaPath) return;
+  const expected = state.expectedSeek;
+  if (expected && Date.now() <= expected.until && Math.abs(ui.video.currentTime - expected.target) < 0.8) {
+    state.expectedSeek = null;
+    return;
   }
+  state.expectedSeek = null;
+  clearCorrection(false);
+  emitControl('player:seek', mediaPayload({ position: ui.video.currentTime }));
 });
 
 ui.video.addEventListener('ratechange', () => {
-  if (state.sourceLoading || !state.mediaReady) return;
-  if (consumeExpected('rate', ui.video.playbackRate, 0.02)) return;
-  if (state.rateCorrectionTimer) {
-    clearTimeout(state.rateCorrectionTimer);
-    state.rateCorrectionTimer = null;
-    state.rateCorrectionDirection = 0;
+  if (state.sourceLoading || !state.mediaPath) return;
+  const expected = state.expectedRate;
+  if (expected && Date.now() <= expected.until && Math.abs(ui.video.playbackRate - expected.value) < 0.01) {
+    state.expectedRate = null;
+    return;
   }
-  if (!emitNow('player:rate', mediaPayload({ rate: ui.video.playbackRate }))) {
-    setNotice('当前正在重连，本次倍速调整不会同步给对方。');
-  }
-});
-
-ui.video.addEventListener('loadedmetadata', () => {
-  if (!state.mediaPath) return;
-  state.sourceLoading = false;
-  state.mediaReady = true;
-  state.buffering = false;
-  if (/正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
-  // The snapshot that triggered this media load can already be several seconds old by
-  // the time Quark resolves the URL. Prefer a fresh authoritative snapshot before seeking.
-  if (state.socket?.connected) {
-    state.forceSyncOnce = true;
-    requestSync();
-  } else if (state.lastServerState) {
-    applyPlayback(state.lastServerState, true);
-  }
-});
-
-ui.video.addEventListener('canplay', () => {
-  const recovered = state.buffering;
-  state.sourceLoading = false;
-  state.mediaReady = true;
-  state.buffering = false;
-  if (/缓冲|网络停滞|正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
-  if (recovered) {
-    if (state.socket?.connected) requestSync();
-    else if (state.lastServerState) applyPlayback(state.lastServerState, false);
-  }
-});
-
-ui.video.addEventListener('playing', () => {
-  state.buffering = false;
-  if (/缓冲|网络停滞/.test(ui.playerNotice.textContent)) setNotice('');
-});
-
-ui.video.addEventListener('waiting', () => {
-  if (!state.mediaPath || state.sourceLoading) return;
-  state.buffering = true;
-  state.lastBufferAt = Date.now();
-  cancelRateCorrection(desiredRoomRate());
-  setNotice(state.compatMode ? '兼容流正在缓冲…不会反复跳进度，等待夸克 CDN 恢复。' : '原画正在缓冲…不会反复跳进度，等待夸克 CDN 恢复。');
-});
-
-ui.video.addEventListener('stalled', () => {
-  if (!state.mediaPath || state.sourceLoading) return;
-  state.buffering = true;
-  state.lastBufferAt = Date.now();
-  cancelRateCorrection(desiredRoomRate());
-  setNotice(state.compatMode ? '兼容流网络停滞，正在等待夸克 CDN…' : '原画直链网络停滞，正在等待夸克 CDN…');
+  state.expectedRate = null;
+  clearTimeout(state.correctionTimer);
+  state.correctionTimer = null;
+  emitControl('player:rate', mediaPayload({ rate: ui.video.playbackRate }));
 });
 
 ui.video.addEventListener('ended', () => {
-  if (!state.mediaPath || !state.mediaReady) return;
-  cancelRateCorrection();
-  const position = Number.isFinite(ui.video.duration) ? ui.video.duration : ui.video.currentTime;
-  state.lastServerState = { ...(state.lastServerState || {}), playing: false, position };
-  emitNow('player:pause', mediaPayload({ position, reason: 'ended' }));
+  if (state.mediaPath) emitControl('player:pause', mediaPayload({ position: ui.video.duration || ui.video.currentTime }));
 });
 
+function setBuffering(value) {
+  const next = Boolean(value);
+  if (state.buffering === next) return;
+  state.buffering = next;
+  ui.selfBuffering.textContent = next ? '正在缓冲' : '播放就绪';
+  if (state.socket?.connected) state.socket.emit('presence:buffering', { buffering: next });
+  if (!next) requestSync(false);
+}
+
+function beginBuffering() {
+  if (ui.video.paused || state.sourceLoading || !state.mediaPath) return;
+  clearTimeout(state.bufferTimer);
+  state.bufferTimer = setTimeout(() => {
+    setBuffering(true);
+    clearCorrection(true);
+  }, 300);
+}
+
+function endBuffering() {
+  clearTimeout(state.bufferTimer);
+  setBuffering(false);
+}
+
+ui.video.addEventListener('waiting', beginBuffering);
+ui.video.addEventListener('stalled', beginBuffering);
+ui.video.addEventListener('playing', endBuffering);
+ui.video.addEventListener('canplay', endBuffering);
 ui.video.addEventListener('error', () => {
   if (!state.mediaPath) return;
   state.sourceLoading = false;
   state.mediaReady = false;
-  state.buffering = false;
-  cancelRateCorrection();
-  setNotice(state.compatMode
-    ? '这台设备的兼容流也无法播放。请尝试恢复原画，或更换 Chrome / Edge / Safari。'
-    : '这台设备无法播放原画。MP4 也可能是 HEVC/H.265 编码；请切换“兼容播放”。');
+  endBuffering();
+  const code = ui.video.error?.code;
+  const message = code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+    ? '浏览器无法播放该视频。可能是编码/封装不受支持，或浏览器不接受该 WebDAV 的直连认证。建议优先使用 MP4（H.264 + AAC）。'
+    : '视频直连失败。请先在设置中测试 WebDAV，并确认 123 云盘/WebDAV 允许当前浏览器直接读取该文件。';
+  setNotice(message, true);
+  ui.syncBadge.textContent = '播放失败';
+  ui.syncBadge.classList.remove('good');
 });
 
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    cancelRateCorrection(desiredRoomRate());
-    return;
-  }
-  if (state.socket?.connected && state.mediaPath) requestSync();
+ui.resumeOverlay.addEventListener('click', () => {
+  state.expectedPlayUntil = Date.now() + 1500;
+  ui.video.play().then(() => ui.resumeOverlay.classList.add('hidden')).catch(() => {});
 });
 
-function renderMessages(messages) {
-  ui.chatMessages.replaceChildren();
-  messages.forEach(appendMessage);
+ui.waitBtn.addEventListener('click', () => emitControl('player:wait'));
+ui.syncNowBtn.addEventListener('click', () => requestSync(true));
+ui.rateSelect.addEventListener('change', () => {
+  if (!state.mediaPath) return;
+  clearCorrection(false);
+  state.expectedRate = null;
+  ui.video.playbackRate = Number(ui.rateSelect.value || 1);
+});
+
+function openSettings() {
+  ui.settingsModal.classList.remove('hidden');
+  loadSettings();
 }
 
-function appendMessage(message) {
-  const wrap = document.createElement('div');
-  wrap.className = 'message';
-  const meta = document.createElement('div');
-  meta.className = 'message-meta';
-  meta.textContent = `${message.nickname} · ${formatTime(message.at)}`;
-  const body = document.createElement('div');
-  body.className = 'message-body';
-  body.textContent = message.text;
-  wrap.append(meta, body);
-  ui.chatMessages.appendChild(wrap);
-  ui.chatMessages.scrollTop = ui.chatMessages.scrollHeight;
+function closeSettings() { ui.settingsModal.classList.add('hidden'); }
+
+ui.settingsBtn.addEventListener('click', openSettings);
+ui.closeSettingsBtn.addEventListener('click', closeSettings);
+ui.settingsModal.addEventListener('click', (event) => { if (event.target === ui.settingsModal) closeSettings(); });
+
+async function loadSettings() {
+  try {
+    const result = await api('/api/settings');
+    state.settings = result.settings;
+    applySettings(result.settings);
+  } catch (error) { setSettingsNotice(error.message, true); }
 }
 
-ui.chatForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const text = ui.chatInput.value.trim();
-  if (!text) return;
-  if (!emitNow('chat:send', { text }, (result) => { if (result?.ok) ui.chatInput.value = ''; })) {
-    setNotice('当前正在重连，消息没有发送。');
-  }
-});
-
-document.querySelectorAll('[data-reaction]').forEach((button) => {
-  button.addEventListener('click', () => {
-    if (!emitNow('reaction:send', { emoji: button.dataset.reaction })) setNotice('当前正在重连，表情没有发送。');
-  });
-});
-
-function showReaction(payload) {
-  const el = document.createElement('div');
-  el.className = 'floating-reaction';
-  el.textContent = payload.emoji;
-  el.style.left = `${10 + Math.random() * 75}%`;
-  ui.reactionLayer.appendChild(el);
-  setTimeout(() => el.remove(), 2600);
+function applySettings(settings) {
+  const webdav = settings?.webdav || {};
+  ui.webdavUrl.value = webdav.url || '';
+  ui.webdavUsername.value = webdav.username || '';
+  ui.webdavPassword.value = '';
+  ui.webdavPassword.placeholder = webdav.passwordSaved ? '已保存；留空保持不变' : 'WebDAV 密码 / 123 云盘应用密码';
+  ui.webdavRoot.value = webdav.root || '/';
 }
+
+function formWebDav() {
+  return {
+    url: ui.webdavUrl.value.trim(),
+    username: ui.webdavUsername.value.trim(),
+    password: ui.webdavPassword.value,
+    root: ui.webdavRoot.value.trim() || '/',
+  };
+}
+
+ui.testWebdavBtn.addEventListener('click', async () => {
+  setSettingsNotice('正在测试 WebDAV...');
+  ui.testWebdavBtn.disabled = true;
+  try {
+    const result = await api('/api/webdav/test', { method: 'POST', body: JSON.stringify(formWebDav()) });
+    setSettingsNotice(`连接成功：${result.result.displayName || result.result.url}`);
+  } catch (error) { setSettingsNotice(error.message, true); }
+  finally { ui.testWebdavBtn.disabled = false; }
+});
+
+ui.saveWebdavBtn.addEventListener('click', async () => {
+  setSettingsNotice('正在验证并保存...');
+  ui.saveWebdavBtn.disabled = true;
+  try {
+    const result = await api('/api/settings/webdav', { method: 'PUT', body: JSON.stringify(formWebDav()) });
+    state.settings = result.settings;
+    applySettings(result.settings);
+    state.libraryPath = '';
+    await loadLibrary('');
+    setSettingsNotice('WebDAV 已保存。视频将通过浏览器直连，不经过本服务器。');
+  } catch (error) { setSettingsNotice(error.message, true); }
+  finally { ui.saveWebdavBtn.disabled = false; }
+});
+
+ui.saveSitePasswordBtn.addEventListener('click', async () => {
+  const password = ui.newSitePassword.value;
+  if (!password) return setSettingsNotice('请输入新访问密码', true);
+  try {
+    await api('/api/settings/password', { method: 'PUT', body: JSON.stringify({ password }) });
+    ui.newSitePassword.value = '';
+    setSettingsNotice('站点访问密码已修改。');
+  } catch (error) { setSettingsNotice(error.message, true); }
+});
 
 bootstrap();
