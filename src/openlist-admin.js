@@ -11,6 +11,10 @@ function extractQr(status = '') {
   return match ? `data:image/jpeg;base64,${match[1]}` : '';
 }
 
+function parseAddition(storage) {
+  try { return JSON.parse(storage?.addition || '{}'); } catch { return {}; }
+}
+
 class OpenListAdmin {
   constructor({ baseUrl, password = '' }) {
     this.baseUrl = String(baseUrl || 'http://127.0.0.1:5244').replace(/\/$/, '');
@@ -82,8 +86,9 @@ class OpenListAdmin {
   }
 
   describe(storage) {
-    if (!storage) return { exists: false, ready: false, status: 'not-configured', qr: '' };
+    if (!storage) return { exists: false, ready: false, status: 'not-configured', qr: '', playMode: '' };
     const status = String(storage.status || '');
+    const addition = parseAddition(storage);
     return {
       exists: true,
       id: storage.id,
@@ -92,7 +97,34 @@ class OpenListAdmin {
       status,
       disabled: Boolean(storage.disabled),
       qr: extractQr(status),
+      playMode: addition.link_method || 'download',
     };
+  }
+
+  async updateQuarkPlayMode(mode = 'streaming') {
+    if (!['download', 'streaming'].includes(mode)) throw new Error('不支持的 QuarkTV 播放模式');
+    const storage = await this.getQuark();
+    if (!storage) throw new Error('还没有创建 QuarkTV 挂载');
+    const addition = parseAddition(storage);
+    if ((addition.link_method || 'download') === mode) return this.describe(storage);
+    addition.link_method = mode;
+    const payload = { ...storage, addition: JSON.stringify(addition) };
+    delete payload.mount_details;
+    await this.request('/api/admin/storage/update', { method: 'POST', body: payload });
+    for (let i = 0; i < 15; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const current = this.describe(await this.getQuark());
+      if (current.playMode === mode && current.ready) return current;
+    }
+    return this.describe(await this.getQuark());
+  }
+
+  async ensureStreamingMode() {
+    const storage = await this.getQuark();
+    if (!storage) return null;
+    const current = this.describe(storage);
+    if (!current.ready || current.playMode === 'streaming') return current;
+    return this.updateQuarkPlayMode('streaming');
   }
 
   async createQuark() {
@@ -105,7 +137,7 @@ class OpenListAdmin {
       refresh_token: '',
       device_id: '',
       query_token: '',
-      link_method: 'download',
+      link_method: 'streaming',
     };
     await this.request('/api/admin/storage/create', {
       method: 'POST',
@@ -143,7 +175,10 @@ class OpenListAdmin {
     for (let i = 0; i < 20; i++) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const current = this.describe(await this.getQuark());
-      if (current.ready) return current;
+      if (current.ready) {
+        if (current.playMode !== 'streaming') return this.updateQuarkPlayMode('streaming');
+        return current;
+      }
       if (current.qr) return current;
     }
     return this.describe(await this.getQuark());
