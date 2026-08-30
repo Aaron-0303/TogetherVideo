@@ -1,19 +1,116 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/><meta name="theme-color" content="#11131a"/><title>TogetherVideo</title><link rel="manifest" href="/manifest.webmanifest?v=0.2.4"/><link rel="stylesheet" href="/styles.css?v=0.2.4"/></head>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0d12" />
+  <title>TogetherVideo 2.0</title>
+  <link rel="stylesheet" href="/styles.css?v=2.0.0" />
+</head>
 <body>
-<div id="loginLayer" class="login-layer hidden"><form id="loginForm" class="login-card"><div class="heart-mark">♥</div><p class="eyebrow">PRIVATE WATCH ROOM</p><h1>一起看，就像坐在一起</h1><p class="muted">输入昵称和访问密码。视频来自夸克网盘，本站只负责同步，不中转视频流。</p><p id="firstRunHint" class="setup-hint hidden">首次部署：访问密码为 <strong>change-me</strong>。登录后会自动打开夸克配置向导，请立即修改密码。</p><label>你的昵称<input id="nicknameInput" maxlength="20" autocomplete="nickname" placeholder="例如：旭旭" required/></label><label>访问密码<input id="passwordInput" type="password" autocomplete="current-password" placeholder="站点密码" required/></label><button class="primary wide" type="submit">进入我们的影院</button><p id="loginError" class="error-text"></p></form></div>
-<div id="app" class="app-shell hidden">
-<header class="topbar"><div class="brand"><span class="brand-heart">♥</span><span>TogetherVideo</span></div><div class="room-actions"><span id="connectionBadge" class="status-badge">连接中</span><button id="settingsBtn" class="ghost small" type="button">设置</button><button id="copyRoomBtn" class="ghost small" type="button">复制房间链接</button><button id="logoutBtn" class="ghost small" type="button">退出</button></div></header>
-<main class="layout">
-<aside id="libraryPanel" class="panel library-panel"><div class="panel-title-row"><div><p class="eyebrow">LIBRARY</p><h2>片库</h2></div><button id="refreshLibraryBtn" class="icon-btn" type="button" title="刷新">↻</button></div><div id="breadcrumbs" class="breadcrumbs"></div><div id="libraryStatus" class="muted compact">正在读取 OpenList...</div><div id="libraryList" class="library-list"></div></aside>
-<section class="watch-column"><div class="player-card"><div class="player-head"><div><p class="eyebrow">NOW WATCHING</p><h2 id="mediaTitle">选择一集开始</h2></div><div id="driftBadge" class="drift-badge">已同步</div></div><div class="video-wrap"><video id="video" controls playsinline preload="metadata"></video><div id="emptyPlayer" class="empty-player"><span class="play-orbit">▶</span><strong>从左侧片库选择视频</strong><span>你选择的剧集会同步给房间里的另一位</span></div><button id="resumeOverlay" class="resume-overlay hidden" type="button">点击继续同步播放</button><div id="reactionLayer" class="reaction-layer"></div></div><div class="room-strip"><div><span class="room-label">房间</span><strong id="roomCodeText">ours</strong></div><div id="members" class="members"></div><button id="compatModeBtn" class="ghost small" type="button" title="若本设备黑屏可切换兼容播放">原画直链</button><button id="syncNowBtn" class="secondary" type="button">立即跟随</button></div><div class="reactions"><span class="muted compact">一起反应</span><button type="button" data-reaction="❤️">❤️</button><button type="button" data-reaction="😂">😂</button><button type="button" data-reaction="😭">😭</button><button type="button" data-reaction="😮">😮</button><button type="button" data-reaction="🥰">🥰</button></div><p id="playerNotice" class="notice"></p></div></section>
-<aside class="panel chat-panel"><div class="panel-title-row"><div><p class="eyebrow">TOGETHER</p><h2>聊天</h2></div><span id="onlineCount" class="online-count">0 在线</span></div><div id="chatMessages" class="chat-messages"></div><form id="chatForm" class="chat-form"><input id="chatInput" maxlength="300" placeholder="说点什么..." autocomplete="off"/><button class="primary" type="submit">发送</button></form></aside>
-</main></div>
-<div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="settings-card"><div class="settings-head"><div><p class="eyebrow">SETUP</p><h2 id="settingsTitle">媒体与站点设置</h2></div><button id="closeSettingsBtn" class="ghost small" type="button">关闭</button></div><p class="muted compact">自动部署不需要 SSH。这里直接完成 OpenList / QuarkTV 授权和片库目录配置。</p>
-<div class="setup-section"><div class="setup-title"><strong>1. OpenList</strong><span id="openlistSetupBadge" class="status-badge">检查中</span></div><p id="openlistSetupText" class="muted compact">正在检查自动启动状态...</p></div>
-<div class="setup-section"><div class="setup-title"><strong>2. 夸克网盘（QuarkTV）</strong><span id="quarkSetupBadge" class="status-badge">未配置</span></div><p id="quarkSetupText" class="muted compact">点击下面按钮生成二维码，然后用夸克 App 扫码。</p><div id="qrWrap" class="qr-wrap hidden"><img id="quarkQr" alt="夸克登录二维码"/><p>请使用夸克 App 扫码并在手机上确认，然后点击“我已扫码”。</p></div><div class="setup-actions"><button id="startQuarkBtn" class="primary" type="button">生成登录二维码</button><button id="finishQuarkBtn" class="secondary hidden" type="button">我已扫码，完成授权</button><button id="resetQuarkBtn" class="ghost hidden" type="button">重新生成二维码</button></div></div>
-<div class="setup-section"><strong>3. 片库目录</strong><p class="muted compact">默认浏览整个 QuarkTV。也可以填成 <code>/QuarkTV/电视剧</code> 等子目录。</p><label class="setting-label">OpenList 媒体根目录<input id="mediaRootInput" value="/QuarkTV" placeholder="/QuarkTV"/></label><button id="saveMediaRootBtn" class="secondary" type="button">保存片库目录</button></div>
-<div class="setup-section"><strong>4. 修改网站访问密码</strong><p class="muted compact">首次部署默认是 <code>change-me</code>，配置完请立刻修改。</p><label class="setting-label">新密码<input id="newSitePasswordInput" type="password" minlength="6" placeholder="至少 6 个字符"/></label><button id="savePasswordBtn" class="secondary" type="button">修改访问密码</button></div>
-<p id="setupNotice" class="notice setup-notice"></p></div></div>
-<script src="/socket.io/socket.io.js"></script><script src="/vendor/hls/hls.min.js"></script><script src="/app.js?v=0.2.4"></script></body></html>
+  <div id="loginLayer" class="login-layer hidden">
+    <form id="loginForm" class="login-card">
+      <div class="logo">♥</div>
+      <p class="eyebrow">TOGETHER · TWO PEOPLE ONLY</p>
+      <h1>一起看，就在这一个房间</h1>
+      <p class="muted">没有房间码，没有创建/加入。登录以后永远进入同一个双人观影空间。</p>
+      <label>你的昵称<input id="nicknameInput" maxlength="20" autocomplete="nickname" placeholder="例如：旭旭" required /></label>
+      <label>访问密码<input id="passwordInput" type="password" autocomplete="current-password" placeholder="首次部署默认 change-me" required /></label>
+      <button class="primary wide" type="submit">进入影院</button>
+      <p id="loginError" class="error"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand"><span>♥</span><strong>TogetherVideo</strong><small>2.0</small></div>
+      <div class="top-actions">
+        <span id="socketBadge" class="pill">连接中</span>
+        <span id="onlineBadge" class="pill">0 / 2 在线</span>
+        <button id="libraryToggle" class="ghost mobile-only" type="button">片库</button>
+        <button id="settingsBtn" class="ghost" type="button">设置</button>
+        <button id="logoutBtn" class="ghost" type="button">退出</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside id="libraryPanel" class="panel library-panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">WEBDAV LIBRARY</p><h2>片库</h2></div>
+          <button id="closeLibraryBtn" class="icon-btn mobile-only" type="button">×</button>
+        </div>
+        <div id="breadcrumbs" class="breadcrumbs"></div>
+        <div class="library-toolbar">
+          <span id="libraryStatus" class="muted compact">正在读取...</span>
+          <button id="refreshLibraryBtn" class="icon-btn" type="button" title="刷新">↻</button>
+        </div>
+        <div id="libraryList" class="library-list"></div>
+      </aside>
+
+      <section class="watch-column">
+        <div class="player-card">
+          <div class="player-head">
+            <div class="title-block"><p class="eyebrow">NOW WATCHING</p><h2 id="mediaTitle">选择一个视频开始</h2></div>
+            <span id="syncBadge" class="sync-badge">等待视频</span>
+          </div>
+
+          <div class="video-shell">
+            <video id="video" controls playsinline preload="metadata"></video>
+            <div id="emptyPlayer" class="empty-player">
+              <span class="play-icon">▶</span>
+              <strong>从片库选择视频</strong>
+              <span>视频会从 WebDAV 直接进入你的浏览器</span>
+            </div>
+            <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击继续同步播放</button>
+          </div>
+
+          <div class="control-bar">
+            <button id="waitBtn" class="wait-button" type="button">等等我</button>
+            <button id="syncNowBtn" class="secondary" type="button">立即对轴</button>
+            <label class="rate-control">倍速
+              <select id="rateSelect">
+                <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
+                <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+              </select>
+            </label>
+          </div>
+
+          <p id="playerNotice" class="notice"></p>
+        </div>
+
+        <div class="status-grid">
+          <div class="status-card">
+            <span class="status-dot online"></span>
+            <div><small>你</small><strong id="selfStatus">在线</strong><span id="selfBuffering" class="muted compact">播放就绪</span></div>
+          </div>
+          <div class="status-card">
+            <span id="peerDot" class="status-dot"></span>
+            <div><small>对方</small><strong id="peerStatus">离线</strong><span id="peerBuffering" class="muted compact">等待上线</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
+    <div class="settings-card">
+      <div class="panel-head"><div><p class="eyebrow">SETTINGS</p><h2>WebDAV 设置</h2></div><button id="closeSettingsBtn" class="ghost" type="button">关闭</button></div>
+      <p class="muted">123 云盘请使用“第三方挂载 / WebDAV”生成的应用密码。视频播放只做 302 跳转，服务器不转发视频数据。</p>
+      <div class="form-grid">
+        <label class="full">WebDAV 地址<input id="webdavUrl" placeholder="https://webdav.123pan.cn/webdav" /></label>
+        <label>用户名<input id="webdavUsername" autocomplete="username" placeholder="123 云盘账号 / WebDAV 用户名" /></label>
+        <label>密码 / 应用密码<input id="webdavPassword" type="password" autocomplete="new-password" placeholder="留空则保留已保存密码" /></label>
+        <label class="full">根目录<input id="webdavRoot" value="/" placeholder="/影视/电视剧" /></label>
+      </div>
+      <div class="settings-actions"><button id="testWebdavBtn" class="secondary" type="button">测试连接</button><button id="saveWebdavBtn" class="primary" type="button">保存并使用</button></div>
+      <hr />
+      <div class="password-row"><label>新的站点访问密码<input id="newSitePassword" type="password" minlength="6" placeholder="至少 6 个字符" /></label><button id="saveSitePasswordBtn" class="ghost" type="button">修改密码</button></div>
+      <p id="settingsNotice" class="notice"></p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js?v=2.0.0"></script>
+</body>
+</html>

@@ -1,24 +1,22 @@
 {
   "name": "together-video",
-  "version": "0.2.4",
+  "version": "2.0.0",
   "private": true,
-  "description": "A private two-person synchronized video room with zero-touch OpenList bootstrap.",
-  "main": "launcher.js",
+  "description": "A private two-person synchronized WebDAV watch room.",
+  "main": "server.js",
   "scripts": {
-    "start": "node launcher.js",
-    "start:app": "node server.js",
+    "start": "node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check launcher.js && node --check server.js && node --check src/config.js && node --check src/openlist.js && node --check src/openlist-admin.js && node --check src/settings.js && node --check src/store.js && node --check src/rooms.js && node --check public/app.js && npm test"
+    "check": "node --check server.js && node --check src/config.js && node --check src/settings.js && node --check src/webdav.js && node --check src/watch-room.js && node --check public/app.js && npm test"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
     "compression": "^1.7.5",
     "cookie-session": "^2.1.0",
     "express": "^4.21.2",
+    "fast-xml-parser": "^5.2.5",
     "helmet": "^8.1.0",
-    "hls.js": "^1.5.18",
-    "socket.io": "^4.8.1",
-    "tar": "^7.4.3"
+    "socket.io": "^4.8.1"
   }
 }

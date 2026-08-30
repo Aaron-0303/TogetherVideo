@@ -1,9 +1,5 @@
 node_modules/
 .env
-.runtime/
-data/state.json
-data/state.json.tmp
-data/settings.json
-data/settings.json.tmp
+data/
 npm-debug.log*
 .DS_Store

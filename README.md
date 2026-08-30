@@ -1,513 +1,300 @@
-# TogetherVideo
+# TogetherVideo 2.0
 
-TogetherVideo 是一个给两个人使用的私人“一起看”网站。它把 **夸克网盘 + OpenList + 双人同步播放器**整合到一个 Node.js 项目里。
+只供两个人使用的同步观影网站。
 
-当前版本专门面向 **“部署平台只允许提供 GitHub 仓库链接”** 的场景：
+2.0 在原项目的 **Node.js + Express + Socket.IO + 原生前端** 基础上继续修改，但旧版的 OpenList / QuarkTV / 多房间逻辑已经废弃。网站现在永久只有一个固定影院，不需要创建房间、加入房间、复制房间链接或输入房间码。
 
-- 不使用 Docker
-- 不要求 SSH 登录服务器
-- 不要求手动安装 OpenList
-- 不要求手动修改 `.env`
-- 不要求进入 OpenList 管理后台
-- 不要求手动配置 systemd / Nginx
+## 核心架构
 
-部署平台只要能够运行 Node.js 20+，执行 `npm install` 和 `npm start`，TogetherVideo 就会自动准备 OpenList。夸克授权、片库目录和网站密码都可以在 TogetherVideo 网页里完成。
+```text
+浏览器 A ─────────────────────→ 123 云盘 / WebDAV
+   │                                 ↑
+   │ WebSocket                       │ 视频数据
+   ↓                                 │
+TogetherVideo 自建服务器             │
+   ↑                                 │
+   │ WebSocket                       │
+   │                                 │
+浏览器 B ─────────────────────→ 123 云盘 / WebDAV
+```
 
-> **低带宽设计：** TogetherVideo 不代理视频字节。播放接口只解析 OpenList / QuarkTV 地址并返回 HTTP 302，视频应由浏览器直接从夸克/CDN获取。对于 4 Mbps 一类的小带宽服务器，这是必须保持的工作方式。
+TogetherVideo 服务器只负责：
 
----
+- 两个人的在线和缓冲状态
+- 播放 / 暂停 / 拖动 / 倍速同步
+- 自动对轴
+- “等等我”
+- WebDAV 连接测试与目录列表
+- 使用 WebDAV 凭据探测文件请求返回的 302 / 签名直链
 
-## 1. 已实现功能
+**服务器没有视频代理接口，不会 pipe 视频，不会转发 Range 视频数据，也不会转码。**
 
-- 站点密码 + 昵称登录
-- 首次启动网页配置向导
-- 自动下载并启动 OpenList
-- 网页直接生成 QuarkTV 登录二维码
-- 使用夸克 App 扫码授权
-- 网页设置媒体根目录
-- OpenList 目录浏览
-- 中文 / 数字自然排序
-- 默认最多 2 人的同步房间
-- 切换剧集同步
+## 功能
+
+- 一个固定房间，最多两个人在线
+- HTML5 Video 原生播放器：播放、暂停、拖动、音量、全屏
+- 0.5×、0.75×、1×、1.25×、1.5×、2× 倍速并同步
+- WebDAV 地址、用户名、密码、根目录网页配置
+- WebDAV 连接测试、目录浏览、视频选择
+- 当前视频同步
 - 播放 / 暂停同步
-- 拖动进度同步
+- 进度跳转同步
 - 倍速同步
-- 每 5 秒播放进度校准
-- 小幅漂移使用短暂倍速修正
-- 大幅漂移直接校准
-- 后加入房间时恢复当前剧集和进度
-- 在线成员显示
-- 房间聊天
-- Emoji 表情反应
-- MP4 / WebM 原生播放
-- m3u8 使用本地 hls.js
-- PC / 手机响应式页面
-- 房间状态、聊天记录和站点配置持久化
-- `/healthz` 健康检查
+- 小误差轻微调速追赶
+- 大误差调整 `currentTime`
+- 缓冲时停止硬跳校准，降低“越同步越卡”的概率
+- 显示自己和对方在线状态
+- 显示对方是否正在缓冲
+- Socket.IO 自动重连
+- 断线期间的旧操作不会排队到重连后补发
+- 重连后恢复当前视频、进度、播放状态和倍速
+- “等等我”一键暂停双方
+- 手机端播放器优先，片库为侧滑面板
 
----
+## WebDAV 与视频直连
 
-## 2. 架构
+目录浏览使用标准 WebDAV `PROPFIND`。这些请求只包含目录元数据，不包含视频内容。
 
-```text
-                         ┌──────────────────┐
-                         │     夸克网盘     │
-                         │     QuarkTV      │
-                         └────────┬─────────┘
-                                  │
-                            视频/CDN直链
-                                  │
-                                  ▼
-                           用户浏览器播放
-                                  ▲
-                                  │
-                     视频字节不经过服务器
-                                  │
-用户浏览器 ── HTTP/WebSocket ──> TogetherVideo
-                                  │
-                             本机 API 请求
-                                  │
-                                  ▼
-                           OpenList 子进程
-                         127.0.0.1:5244
-```
-
-TogetherVideo 的 `/api/play` 流程是：
+播放需要认证的 WebDAV 文件时，流程是：
 
 ```text
-浏览器
-  ↓
-TogetherVideo /api/play
-  ↓
-OpenList /api/fs/get
-  ↓
-取得 QuarkTV raw_url
-  ↓
-HTTP 302
-  ↓
-浏览器直接连接夸克/CDN
+TogetherVideo
+    │  带 WebDAV Basic Auth，只探测 HEAD / 1-byte Range
+    ▼
+WebDAV
+    │
+    └── 302 / 307 Location ──→ 临时下载地址
+                                 │
+                                 ▼
+                        返回给 HTML5 Video
+                                 │
+                                 ▼
+                           浏览器直接播放
 ```
 
-代码中没有视频 `pipe()`、Range 中转或服务器转码逻辑。
+TogetherVideo 不把 WebDAV 用户名和密码放进播放器 URL。现代浏览器通常会阻止带 `user:password@host` 的媒体子资源，因此 2.0 要求需要认证的 WebDAV 在文件请求时能够返回浏览器可访问的 302 / 307 / 签名直链。
 
----
+如果某个 WebDAV 只能在认证后直接返回文件正文、却不提供浏览器可用的重定向地址，网站会明确报错，而**不会为了能播而退化成服务器视频代理**。
 
-# 3. 自动化部署要求
+123 云盘官网目前明确提供 WebDAV 协议挂载和第三方应用直连能力。本项目只使用 WebDAV / 普通下载链路，不默认启用其收费的直链 CDN 或音视频分发服务。
 
-部署平台需要满足：
+## 推荐视频格式
 
-| 项目 | 要求 |
-| --- | --- |
-| 操作系统 | Linux |
-| CPU | x86_64 / amd64 或 arm64 |
-| Node.js | 20 或更高 |
-| 安装命令 | `npm install` |
-| 启动命令 | `npm start` |
-| 对外端口 | 使用平台提供的 `PORT`，未提供时默认 `3000` |
-| 文件写入 | 项目目录必须可写 |
-| 子进程 | 必须允许 Node.js 启动 OpenList 子进程 |
-| 外网访问 | 服务器需要能访问 GitHub Releases 和夸克服务 |
+浏览器兼容性最稳妥的是：
 
-通常只需要向自动部署平台提供：
+```text
+MP4 + H.264 / AVC + AAC
+```
+
+`.mp4` 只是封装格式。如果内部视频编码是 H.265 / HEVC，或音频使用 DTS 等编码，不同浏览器仍可能黑屏或无声。2.0 不做服务器转码。
+
+## 自动对轴
+
+服务端保存唯一权威时间线：
+
+```text
+media
+mediaVersion
+playing
+position
+rate
+anchorAt
+revision
+```
+
+播放状态为 `playing=true` 时，后端使用 `anchorAt` 动态计算当前理论进度。
+
+客户端大约每 4 秒与服务器校时，并测量一次 WebSocket 往返时间用于修正目标时间。
+
+基本策略：
+
+```text
+误差 <= 0.25 秒
+    不处理
+
+约 0.35 ~ 1.8 秒
+    临时轻微修改 playbackRate 追赶
+
+> 1.8 秒
+    非缓冲状态下调整 currentTime
+```
+
+为了减少卡顿：
+
+- `waiting / stalled` 时不硬跳进度
+- 缓冲时恢复正常倍速，不继续加速追赶
+- 自动硬校准之间至少间隔约 6 秒
+- 换视频后使用 `mediaVersion` 丢弃上一视频迟到的旧事件
+- 程序触发的 play / pause / seek / ratechange 不会反向当作用户操作广播
+- 用户点击“立即对轴”时才主动强制跟随服务器最新位置
+
+## “等等我”
+
+任意一方点击：
+
+```text
+等等我
+```
+
+服务器立即把唯一权威时间线改为暂停，然后同时广播给两个人。
+
+适合一方加载较慢、临时离开或网络突然变差时使用。
+
+## 在线和缓冲状态
+
+顶部显示：
+
+```text
+1 / 2 在线
+2 / 2 在线
+```
+
+播放器下方分别显示自己和对方状态。浏览器发生持续 `waiting / stalled` 时会向服务器上报缓冲状态，对方可以直接看到“正在缓冲”。
+
+## 断线恢复
+
+Socket.IO 自动重连。断线期间的播放控制不会排队。
+
+重新连接后客户端会：
+
+1. 获取当前唯一房间状态
+2. 恢复当前视频
+3. 重新取得 WebDAV 直链
+4. 恢复进度和倍速
+5. 恢复播放 / 暂停状态
+6. 继续自动对轴
+
+## WebDAV 设置
+
+首次进入网站后打开 **设置**，填写：
+
+```text
+WebDAV 地址
+用户名
+密码 / 应用密码
+根目录
+```
+
+根目录例如：
+
+```text
+/
+```
+
+或：
+
+```text
+/影视/电视剧
+```
+
+先点击 **测试连接**，成功后点击 **保存并使用**。
+
+WebDAV 密码保存在服务器的 `data/settings.json`，文件以私有权限创建。设置 API 不会把密码明文返回网页；之后密码输入框留空表示继续使用已保存密码。
+
+## 部署
+
+仓库：
 
 ```text
 https://github.com/Aaron-0303/TogetherVideo.git
 ```
 
-如果平台要求填写构建 / 启动命令：
+要求：
 
-```text
-Build / Install: npm install
-Start:           npm start
-```
+- Linux 或其他可运行 Node.js 的环境
+- Node.js 20+
+- `data/` 目录可持久化
 
-TogetherVideo 默认监听：
-
-```text
-0.0.0.0:$PORT
-```
-
-因此部署平台只需要暴露 TogetherVideo 自己的端口。**OpenList 的 5244 不需要暴露公网。**
-
----
-
-# 4. 第一次启动会发生什么
-
-第一次执行：
+安装：
 
 ```bash
-npm start
-```
-
-`launcher.js` 会自动完成：
-
-1. 判断服务器 CPU 架构；
-2. 从 OpenList 官方 GitHub Release 下载对应 Linux 二进制；
-3. 解压到：
-
-```text
-.runtime/openlist/
-```
-
-4. 在本机启动 OpenList：
-
-```text
-127.0.0.1:5244
-```
-
-5. 自动生成一个随机的 OpenList 内部管理员密码；
-6. 该密码只保存在服务器本地，不显示给普通用户；
-7. 启动 TogetherVideo；
-8. TogetherVideo 通过本机 OpenList 管理 API 完成后续 QuarkTV 配置。
-
-所以你不需要自己安装或登录 OpenList。
-
----
-
-# 5. 第一次打开网站
-
-第一次打开部署好的 TogetherVideo 网站时：
-
-```text
-昵称：随便填写
-访问密码：change-me
-```
-
-这是仅用于首次进入的默认密码。
-
-登录后网站会自动打开 **“媒体与站点设置”**。
-
-建议第一次配置完成后立即在设置页修改访问密码。
-
-> 因为首次密码是公开默认值，部署完成后应尽快打开网站完成初始化，不要长期保持 `change-me`。
-
----
-
-# 6. 网页配置夸克
-
-不需要进入 OpenList 后台。
-
-在 TogetherVideo：
-
-```text
-设置
-  ↓
-媒体与站点设置
-  ↓
-夸克网盘（QuarkTV）
-```
-
-点击：
-
-```text
-生成登录二维码
-```
-
-TogetherVideo 会通过 OpenList 管理 API 自动创建：
-
-```text
-挂载路径：/QuarkTV
-驱动：QuarkTV
-视频链接方式：download
-Web Proxy：关闭
-Proxy Range：关闭
-```
-
-页面随后显示二维码。
-
-使用手机上的 **夸克 App** 扫码并确认授权，然后点击：
-
-```text
-我已扫码，完成授权
-```
-
-TogetherVideo 会自动重新初始化 QuarkTV 挂载并检查授权状态。
-
-成功后页面显示：
-
-```text
-QuarkTV 已连接
-```
-
-如果二维码过期，可以点击：
-
-```text
-重新生成二维码
-```
-
----
-
-# 7. 设置片库目录
-
-QuarkTV 授权完成以后，默认片库根目录为：
-
-```text
-/QuarkTV
-```
-
-即显示整个夸克网盘。
-
-如果你的电视剧在：
-
-```text
-夸克网盘/
-└── 电视剧/
-    ├── 想见你/
-    ├── 庆余年/
-    └── ...
-```
-
-可以在网页设置中填写：
-
-```text
-/QuarkTV/电视剧
-```
-
-点击：
-
-```text
-保存片库目录
-```
-
-无需重启应用。
-
-TogetherVideo 会限制片库浏览范围在该目录及其子目录内。
-
----
-
-# 8. 修改访问密码
-
-在：
-
-```text
-设置 → 修改网站访问密码
-```
-
-输入至少 6 个字符的新密码即可。
-
-密码不会明文写入 `settings.json`，TogetherVideo 保存的是密码哈希。
-
----
-
-# 9. 持久化非常重要
-
-自动化部署平台必须保留以下数据：
-
-```text
-.runtime/openlist/
-data/
-```
-
-其中：
-
-```text
-.runtime/openlist/
-├── openlist                 OpenList 程序
-├── data/                    OpenList 数据库、QuarkTV token 等
-├── .admin-secret            内部随机管理员密码
-└── .admin-ready             初始化标记
-
-data/
-├── settings.json            TogetherVideo 配置
-└── state.json               房间状态、聊天等
-```
-
-如果部署平台每次重新部署都会删除整个工作目录，应给以下目录配置持久化磁盘 / Volume：
-
-```text
-.runtime/openlist
-/data
-```
-
-实际挂载路径应以部署平台的项目工作目录为准。
-
-如果这些目录被删除：
-
-- QuarkTV 需要重新扫码；
-- 网站密码会恢复；
-- 房间历史会丢失。
-
-普通服务器上直接 `git pull` 更新不会删除这些目录，因为它们已经加入 `.gitignore`。
-
----
-
-# 10. 服务器带宽为什么够用
-
-TogetherVideo 本身只承担：
-
-```text
-HTML / CSS / JS
-OpenList API 查询
-Socket.IO 同步
-聊天
-少量状态数据
-```
-
-视频应当：
-
-```text
-浏览器 ─────────────────→ 夸克/CDN
-```
-
-而不是：
-
-```text
-夸克 → 服务器 → 浏览器
-```
-
-因此即使服务器只有：
-
-```text
-4 Mbps
-300 GB / 月
-```
-
-只要 QuarkTV 直链工作正常，服务器带宽通常不是主要瓶颈。
-
----
-
-# 11. 如何确认没有中转视频
-
-部署完成以后推荐做一次验证。
-
-浏览器打开开发者工具：
-
-```text
-F12 → Network / 网络
-```
-
-播放一集视频。
-
-应看到类似：
-
-```text
-/api/play
-    ↓ 302
-夸克 / CDN 域名
-```
-
-最终的大量视频数据请求应该来自夸克/CDN，而不是 TogetherVideo 服务器。
-
-如果媒体数据持续来自 TogetherVideo 的服务器域名，并产生高带宽流量，应停止使用并检查 QuarkTV 链接方式。
-
----
-
-# 12. 视频格式兼容性
-
-网页浏览器最稳定的是：
-
-```text
-MP4
-H.264
-AAC
-```
-
-可能存在兼容问题：
-
-```text
-MKV
-H.265 / HEVC
-DTS
-ASS 内封字幕
-```
-
-OpenList 能获得文件并不代表浏览器一定能够解码。
-
-TogetherVideo 故意不做服务器转码，因为转码会明显增加服务器 CPU 和带宽压力。
-
----
-
-# 13. 可选环境变量
-
-**正常自动部署不需要创建 `.env`。**
-
-如果部署平台需要特殊设置，可以参考 `.env.example`。
-
-常用可选变量：
-
-```env
-PORT=3000
-HOST=0.0.0.0
-OPENLIST_MANAGED=true
-DEFAULT_ROOM=ours
-MAX_ROOM_USERS=2
-```
-
-## 使用已有 OpenList
-
-高级场景下，也可以关闭自动 OpenList：
-
-```env
-OPENLIST_MANAGED=false
-OPENLIST_BASE_URL=http://127.0.0.1:5244
-OPENLIST_ADMIN_PASSWORD=已有OpenList管理员密码
-```
-
-普通用户不需要这样做。
-
----
-
-# 14. 健康检查
-
-部署平台可以把健康检查配置为：
-
-```text
-/healthz
-```
-
-正常返回：
-
-```json
-{
-  "ok": true
-}
-```
-
-如果 OpenList 自动下载 / 启动失败，健康检查仍会保留 TogetherVideo 进程，并在响应或网页设置页显示 bootstrap 错误，方便定位自动部署环境限制。
-
----
-
-# 15. 更新
-
-更新 TogetherVideo 只需要让部署平台重新拉取 GitHub 主分支并执行：
-
-```text
 npm install
+```
+
+启动：
+
+```bash
 npm start
 ```
 
-只要 `.runtime/openlist/` 和 `data/` 被保留，夸克授权和站点配置无需重做。
+默认端口：
 
----
+```text
+3000
+```
 
-# 16. 开发检查
+自动部署平台如果提供 `PORT`，程序会自动使用该端口。
+
+首次访问默认站点密码：
+
+```text
+change-me
+```
+
+登录后请在“设置”里立即修改。
+
+## 可选环境变量
+
+WebDAV 不需要环境变量，直接在网页里配置即可。
+
+`.env.example` 中只有部署层参数：
+
+```env
+HOST=0.0.0.0
+PORT=3000
+SITE_PASSWORD=change-me
+COOKIE_SECURE=false
+TRUST_PROXY=true
+DATA_DIR=./data
+```
+
+网站固定两个人，不提供可修改的房间数或人数参数。
+
+## 持久化
+
+部署平台必须持久化：
+
+```text
+data/
+```
+
+主要保存：
+
+```text
+data/settings.json
+  WebDAV 配置
+  站点密码哈希
+  Session 密钥
+
+data/watch-state.json
+  当前视频
+  播放状态
+  进度
+  倍速
+```
+
+## HTTPS
+
+生产环境建议使用 HTTPS，尤其因为设置页面需要提交 WebDAV 密码。
+
+如果 HTTPS 由部署平台 / 反向代理终止：
+
+```env
+TRUST_PROXY=true
+COOKIE_SECURE=true
+```
+
+如果当前仍是普通 HTTP：
+
+```env
+COOKIE_SECURE=false
+```
+
+## 开发检查
 
 ```bash
+npm install
 npm run check
 ```
 
-用于检查 Node.js / 浏览器脚本语法。
-
----
-
-# 17. 自动部署检查表
-
-部署人员只需要确认：
-
-- [ ] 仓库使用 `main`
-- [ ] Node.js >= 20
-- [ ] 安装命令为 `npm install`
-- [ ] 启动命令为 `npm start`
-- [ ] 对外暴露 `$PORT`
-- [ ] 允许应用写项目目录
-- [ ] 允许 Node.js 创建子进程
-- [ ] 能访问 GitHub Releases
-- [ ] `.runtime/openlist/` 有持久化
-- [ ] `data/` 有持久化
-- [ ] 打开网页，使用 `change-me` 首次登录
-- [ ] 网页中完成 QuarkTV 扫码
-- [ ] 修改网站访问密码
-- [ ] 选择片库目录
-- [ ] 播放视频后确认 `/api/play` 跳转到夸克/CDN
-
-做到这些即可，不需要登录服务器操作。
+检查包含 JavaScript 语法以及单房间状态、旧媒体事件隔离、WebDAV PROPFIND 解析和“认证 WebDAV 必须提供浏览器直链”的回归测试。
