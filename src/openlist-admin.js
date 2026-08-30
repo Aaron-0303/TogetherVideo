@@ -20,6 +20,7 @@ class OpenListAdmin {
     this.baseUrl = String(baseUrl || 'http://127.0.0.1:5244').replace(/\/$/, '');
     this.password = password;
     this.token = '';
+    this.modeLock = Promise.resolve();
   }
 
   setPassword(password) { this.password = password || ''; this.token = ''; }
@@ -101,7 +102,7 @@ class OpenListAdmin {
     };
   }
 
-  async updateQuarkPlayMode(mode = 'streaming') {
+  async updateQuarkPlayMode(mode = 'download') {
     if (!['download', 'streaming'].includes(mode)) throw new Error('不支持的 QuarkTV 播放模式');
     const storage = await this.getQuark();
     if (!storage) throw new Error('还没有创建 QuarkTV 挂载');
@@ -112,19 +113,37 @@ class OpenListAdmin {
     delete payload.mount_details;
     await this.request('/api/admin/storage/update', { method: 'POST', body: payload });
     for (let i = 0; i < 15; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 400));
       const current = this.describe(await this.getQuark());
       if (current.playMode === mode && current.ready) return current;
     }
     return this.describe(await this.getQuark());
   }
 
-  async ensureStreamingMode() {
+  async ensureDownloadMode() {
     const storage = await this.getQuark();
     if (!storage) return null;
     const current = this.describe(storage);
-    if (!current.ready || current.playMode === 'streaming') return current;
-    return this.updateQuarkPlayMode('streaming');
+    if (!current.ready || current.playMode === 'download') return current;
+    return this.updateQuarkPlayMode('download');
+  }
+
+  async withPlayMode(mode, task) {
+    if (!['download', 'streaming'].includes(mode)) throw new Error('不支持的 QuarkTV 播放模式');
+    const previous = this.modeLock;
+    let release;
+    this.modeLock = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      await this.updateQuarkPlayMode(mode);
+      return await task();
+    } finally {
+      if (mode !== 'download') {
+        try { await this.updateQuarkPlayMode('download'); }
+        catch (error) { console.warn('[openlist] failed to restore QuarkTV download mode:', error.message); }
+      }
+      release();
+    }
   }
 
   async createQuark() {
@@ -137,7 +156,7 @@ class OpenListAdmin {
       refresh_token: '',
       device_id: '',
       query_token: '',
-      link_method: 'streaming',
+      link_method: 'download',
     };
     await this.request('/api/admin/storage/create', {
       method: 'POST',
@@ -176,7 +195,7 @@ class OpenListAdmin {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const current = this.describe(await this.getQuark());
       if (current.ready) {
-        if (current.playMode !== 'streaming') return this.updateQuarkPlayMode('streaming');
+        if (current.playMode !== 'download') return this.updateQuarkPlayMode('download');
         return current;
       }
       if (current.qr) return current;
