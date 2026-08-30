@@ -35,7 +35,9 @@ function cleanRelative(value = '') {
   const raw = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
   const normalized = path.posix.normalize(raw || '.');
   if (normalized === '.') return '';
-  if (normalized === '..' || normalized.startsWith('../')) throw new WebDavError('非法 WebDAV 路径', 400, 'WEBDAV_BAD_PATH');
+  if (normalized === '..' || normalized.startsWith('../')) {
+    throw new WebDavError('非法 WebDAV 路径', 400, 'WEBDAV_BAD_PATH');
+  }
   return normalized.replace(/^\/+/, '');
 }
 
@@ -133,8 +135,16 @@ class WebDavClient {
   }
 
   async test() {
-    const { responses } = await this.propfind('', 0);
-    return { ok: true, message: responses.length ? 'WebDAV 连接成功' : 'WebDAV 已响应' };
+    const { url, responses } = await this.propfind('', 0);
+    const target = new URL(url);
+    const rootName = decodeURIComponent(target.pathname).split('/').filter(Boolean).pop() || '/';
+    const prop = bestProp(responses[0]);
+    return {
+      ok: true,
+      message: responses.length ? 'WebDAV 连接成功' : 'WebDAV 已响应',
+      displayName: String(prop.displayname || rootName || '/'),
+      url: `${target.origin}${target.pathname}`,
+    };
   }
 
   async list(relativePath = '') {
@@ -159,6 +169,7 @@ class WebDavClient {
       const childRelative = cleanRelative(relative ? `${relative}/${name}` : name);
       items.push({
         name,
+        path: childRelative,
         relativePath: childRelative,
         isDir,
         size: Number(prop.getcontentlength || 0),
@@ -166,7 +177,7 @@ class WebDavClient {
         modified: String(prop.getlastmodified || ''),
       });
     }
-    return { relativePath: relative, items };
+    return { path: relative, relativePath: relative, items };
   }
 
   async probeDirect(relativePath, method) {
