@@ -13,9 +13,11 @@ const state = {
   nickname: '', participantId: '', socket: null, settings: null,
   libraryPath: '', librarySeq: 0,
   mediaPath: '', mediaVersion: 0, sourceLoading: false, mediaReady: false, loadSeq: 0,
-  lastSnapshot: null, halfRttMs: 0, buffering: false, bufferTimer: null,
+  lastSnapshot: null, lastRevision: -1, halfRttMs: 0,
+  buffering: false, bufferTimer: null, lastBufferEndAt: 0,
   expectedPlayUntil: 0, expectedPauseUntil: 0, expectedSeek: null, expectedRate: null,
   correctionTimer: null, correctionToken: 0, lastHardSeekAt: 0, syncTimer: null, lastPeerName: '',
+  seeking: false,
 };
 
 async function api(url, options = {}) {
@@ -287,7 +289,11 @@ function targetPosition(snapshot) {
 
 function applySnapshot(snapshot, force = false) {
   if (!snapshot || typeof snapshot !== 'object') return;
+  const revision = Number(snapshot.revision || 0);
+  if (revision < state.lastRevision) return;
+  if (revision > state.lastRevision) state.lastRevision = revision;
   state.lastSnapshot = snapshot;
+
   if (!snapshot.media) {
     if (state.mediaPath) clearMedia();
     return;
@@ -308,13 +314,13 @@ function loadMedia(snapshot) {
   state.sourceLoading = true;
   state.mediaReady = false;
   clearCorrection(false);
-  setBuffering(false);
+  setBuffering(Boolean(snapshot.playing));
   ui.mediaTitle.textContent = snapshot.media.name || snapshot.media.path.split('/').pop();
   ui.emptyPlayer.classList.add('hidden');
   ui.resumeOverlay.classList.add('hidden');
   ui.syncBadge.textContent = '正在加载';
   ui.syncBadge.classList.remove('good');
-  setNotice('正在从 WebDAV 获取视频直链…');
+  setNotice('正在从 WebDAV 获取浏览器直连地址…');
 
   ui.video.pause();
   ui.video.removeAttribute('src');
@@ -340,6 +346,7 @@ function clearMedia() {
   state.mediaVersion = Number(state.lastSnapshot?.mediaVersion || state.mediaVersion + 1);
   state.sourceLoading = false;
   state.mediaReady = false;
+  state.seeking = false;
   clearCorrection(false);
   setBuffering(false);
   ui.video.pause();
@@ -361,16 +368,17 @@ function applyPlayback(snapshot, force = false) {
   const absDrift = Math.abs(drift);
   const explicitSeek = snapshot.reason === 'seek';
   const pausedAlignment = !snapshot.playing && absDrift > 0.15;
+  const sinceBuffer = Date.now() - state.lastBufferEndAt;
 
   if (force || explicitSeek || pausedAlignment) {
     clearCorrection(false);
     setProgrammaticRate(desiredRate);
     if (absDrift > 0.12) setProgrammaticSeek(target);
-  } else if (!state.buffering && absDrift > 1.8 && Date.now() - state.lastHardSeekAt > 6000) {
+  } else if (!state.buffering && sinceBuffer > 3000 && absDrift > 1.8 && Date.now() - state.lastHardSeekAt > 6000) {
     clearCorrection(false);
     setProgrammaticRate(desiredRate);
     setProgrammaticSeek(target);
-  } else if (!state.buffering && snapshot.playing && absDrift > 0.35) {
+  } else if (!state.buffering && sinceBuffer > 1200 && snapshot.playing && absDrift > 0.35) {
     const adjust = Math.min(0.06, Math.max(0.02, absDrift * 0.03));
     const corrected = drift < 0 ? desiredRate + adjust : desiredRate - adjust;
     const token = ++state.correctionToken;
@@ -409,11 +417,17 @@ ui.video.addEventListener('play', () => {
 ui.video.addEventListener('pause', () => {
   if (state.sourceLoading) return;
   if (Date.now() <= state.expectedPauseUntil) { state.expectedPauseUntil = 0; return; }
+  if (state.seeking || ui.video.seeking) return;
   if (ui.video.ended || !state.mediaPath) return;
   emitControl('player:pause', mediaPayload({ position: ui.video.currentTime }));
 });
 
+ui.video.addEventListener('seeking', () => {
+  state.seeking = true;
+});
+
 ui.video.addEventListener('seeked', () => {
+  state.seeking = false;
   if (state.sourceLoading || !state.mediaPath) return;
   const expected = state.expectedSeek;
   if (expected && Date.now() <= expected.until && Math.abs(ui.video.currentTime - expected.target) < 0.8) {
@@ -445,7 +459,9 @@ ui.video.addEventListener('ended', () => {
 function setBuffering(value) {
   const next = Boolean(value);
   if (state.buffering === next) return;
+  const wasBuffering = state.buffering;
   state.buffering = next;
+  if (wasBuffering && !next) state.lastBufferEndAt = Date.now();
   ui.selfBuffering.textContent = next ? '正在缓冲' : '播放就绪';
   if (state.socket?.connected) state.socket.emit('presence:buffering', { buffering: next });
   if (!next) requestSync(false);
@@ -476,8 +492,8 @@ ui.video.addEventListener('error', () => {
   endBuffering();
   const code = ui.video.error?.code;
   const message = code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-    ? '浏览器无法播放该视频。可能是编码/封装不受支持，或浏览器不接受该 WebDAV 的直连认证。建议优先使用 MP4（H.264 + AAC）。'
-    : '视频直连失败。请先在设置中测试 WebDAV，并确认 123 云盘/WebDAV 允许当前浏览器直接读取该文件。';
+    ? '浏览器无法播放该视频。可能是编码/封装不受支持，或 WebDAV 没有提供浏览器可直接访问的文件地址。建议优先使用 MP4（H.264 + AAC）。'
+    : '视频直连失败。请先在设置中测试 WebDAV；如果该 WebDAV 只允许 Basic Auth 读取文件、不给 302/签名直链，在“服务器不代理视频”的前提下浏览器无法播放。';
   setNotice(message, true);
   ui.syncBadge.textContent = '播放失败';
   ui.syncBadge.classList.remove('good');
@@ -539,7 +555,7 @@ ui.testWebdavBtn.addEventListener('click', async () => {
   ui.testWebdavBtn.disabled = true;
   try {
     const result = await api('/api/webdav/test', { method: 'POST', body: JSON.stringify(formWebDav()) });
-    setSettingsNotice(`连接成功：${result.result.displayName || result.result.url}`);
+    setSettingsNotice(result.result.message || 'WebDAV 连接成功');
   } catch (error) { setSettingsNotice(error.message, true); }
   finally { ui.testWebdavBtn.disabled = false; }
 });
@@ -553,7 +569,7 @@ ui.saveWebdavBtn.addEventListener('click', async () => {
     applySettings(result.settings);
     state.libraryPath = '';
     await loadLibrary('');
-    setSettingsNotice('WebDAV 已保存。视频将通过浏览器直连，不经过本服务器。');
+    setSettingsNotice('WebDAV 已保存。视频只会通过浏览器直连，不经过本服务器。');
   } catch (error) { setSettingsNotice(error.message, true); }
   finally { ui.saveWebdavBtn.disabled = false; }
 });
