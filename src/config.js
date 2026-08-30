@@ -18,6 +18,7 @@ function normalizeRoot(value) {
 }
 
 module.exports = {
+  host: (process.env.HOST || '127.0.0.1').trim(),
   port: integer('PORT', 3000),
   sitePassword: process.env.SITE_PASSWORD || 'change-me',
   sessionSecret: process.env.SESSION_SECRET || 'please-change-this-session-secret',
