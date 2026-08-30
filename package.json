@@ -1,0 +1,21 @@
+{
+  "name": "together-video",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A private two-person synchronized video room powered by OpenList direct links.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node --watch server.js",
+    "check": "node --check server.js && node --check src/config.js && node --check src/openlist.js && node --check src/store.js && node --check src/rooms.js && node --check public/app.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "compression": "^1.7.5",
+    "cookie-session": "^2.1.0",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0",
+    "hls.js": "^1.5.18",
+    "socket.io": "^4.8.1"
+  }
+}
