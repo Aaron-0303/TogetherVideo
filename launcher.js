@@ -9,6 +9,7 @@ const root = process.cwd();
 const runtimeDir = path.join(root, '.runtime', 'openlist');
 const archivePath = path.join(runtimeDir, 'openlist.tar.gz');
 const binaryPath = path.join(runtimeDir, process.platform === 'win32' ? 'openlist.exe' : 'openlist');
+const configPath = path.join(runtimeDir, 'data', 'config.json');
 const adminSecretPath = path.join(runtimeDir, '.admin-secret');
 const adminReadyPath = path.join(runtimeDir, '.admin-ready');
 const baseUrl = process.env.OPENLIST_BASE_URL || 'http://127.0.0.1:5244';
@@ -65,6 +66,18 @@ async function ensureBinary() {
   await fsp.chmod(binaryPath, 0o755);
   await fsp.rm(archivePath, { force: true });
   console.log('[bootstrap] OpenList binary ready');
+}
+
+async function forceLoopbackConfig() {
+  try {
+    const cfg = JSON.parse(await fsp.readFile(configPath, 'utf8'));
+    cfg.scheme = cfg.scheme || {};
+    cfg.scheme.address = '127.0.0.1';
+    cfg.scheme.http_port = 5244;
+    await fsp.writeFile(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[bootstrap] unable to force OpenList loopback config:', error.message);
+  }
 }
 
 function spawnOpenList() {
@@ -126,19 +139,27 @@ async function startManagedOpenList() {
   }
   await ensureBinary();
   const secret = await ensureAdminSecret();
-  spawnOpenList();
-  if (!(await waitForOpenList())) throw new Error('OpenList 启动失败或 30 秒内未就绪');
-
   let adminReady = false;
   try { await fsp.access(adminReadyPath); adminReady = true; } catch {}
-  if (!adminReady) {
+
+  if (adminReady) {
+    await forceLoopbackConfig();
+    spawnOpenList();
+    if (!(await waitForOpenList())) throw new Error('OpenList 启动失败或 30 秒内未就绪');
+  } else {
+    // First launch creates OpenList's database and config. It is restarted immediately
+    // with a loopback-only HTTP listener and a private internal admin password.
+    spawnOpenList();
+    if (!(await waitForOpenList())) throw new Error('OpenList 首次初始化失败或 30 秒内未就绪');
     console.log('[bootstrap] initializing private OpenList admin credentials');
     await stopOpenList();
+    await forceLoopbackConfig();
     setAdminPassword(secret);
     await fsp.writeFile(adminReadyPath, 'ok\n');
     spawnOpenList();
     if (!(await waitForOpenList())) throw new Error('OpenList 初始化管理员后重新启动失败');
   }
+
   process.env.OPENLIST_ADMIN_PASSWORD = secret;
   return secret;
 }
