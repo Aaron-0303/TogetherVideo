@@ -69,14 +69,18 @@ async function main() {
 
   function currentWebDav() {
     const webdav = settings.webdav();
-    if (!webdav.url || !webdav.username || !webdav.password) throw new WebDavError('请先在设置中配置 WebDAV', 400);
+    if (!webdav.url || !webdav.username || !webdav.password) {
+      throw new WebDavError('请先在设置中完整配置 WebDAV', 400, 'WEBDAV_NOT_CONFIGURED');
+    }
     return new WebDavClient(webdav);
   }
 
   app.get('/healthz', (_req, res) => res.json({ ok: true, version: '2.0.0' }));
 
   app.post('/api/login', (req, res) => {
-    if (!settings.verifySitePassword(req.body?.password)) return res.status(401).json({ ok: false, error: '访问密码错误' });
+    if (!settings.verifySitePassword(req.body?.password)) {
+      return res.status(401).json({ ok: false, error: '访问密码错误' });
+    }
     req.session.authenticated = true;
     req.session.nickname = cleanName(req.body?.nickname);
     req.session.participantId = req.session.participantId || crypto.randomUUID();
@@ -107,7 +111,9 @@ async function main() {
   app.post('/api/webdav/test', async (req, res, next) => {
     try {
       const candidate = settings.previewWebDav(req.body || {});
-      if (!candidate.url || !candidate.username || !candidate.password) throw new WebDavError('请完整填写 WebDAV 地址、用户名和密码', 400);
+      if (!candidate.url || !candidate.username || !candidate.password) {
+        throw new WebDavError('请完整填写 WebDAV 地址、用户名和密码', 400, 'WEBDAV_INCOMPLETE');
+      }
       const result = await new WebDavClient(candidate).test();
       res.json({ ok: true, result });
     } catch (error) { next(error); }
@@ -116,7 +122,9 @@ async function main() {
   app.put('/api/settings/webdav', async (req, res, next) => {
     try {
       const candidate = settings.previewWebDav(req.body || {});
-      if (!candidate.url || !candidate.username || !candidate.password) throw new WebDavError('请完整填写 WebDAV 地址、用户名和密码', 400);
+      if (!candidate.url || !candidate.username || !candidate.password) {
+        throw new WebDavError('请完整填写 WebDAV 地址、用户名和密码', 400, 'WEBDAV_INCOMPLETE');
+      }
       await new WebDavClient(candidate).test();
       await settings.setWebDav(req.body || {});
       const snapshot = room.apply('clear', {}, req.session.nickname || '设置');
@@ -137,29 +145,36 @@ async function main() {
       const result = await currentWebDav().list(String(req.query.path || ''));
       result.items = result.items
         .filter((item) => item.isDir || VIDEO_EXTENSIONS.has(path.extname(item.name).toLowerCase()))
+        .map((item) => ({ ...item, path: item.path || item.relativePath }))
         .sort((a, b) => a.isDir !== b.isDir
           ? (a.isDir ? -1 : 1)
           : a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-      res.json({ ok: true, ...result });
+      res.set('Cache-Control', 'no-store');
+      res.json({ ok: true, path: result.path || result.relativePath || '', items: result.items });
     } catch (error) { next(error); }
   });
 
-  // This route never fetches media bytes. It only issues a 302 to the WebDAV file URL.
-  // The browser follows the redirect and downloads/streams the video from WebDAV directly.
-  app.get('/api/media', (req, res, next) => {
+  // Strict no-proxy route: it may authenticate to WebDAV only to discover a 302/signed URL.
+  // It never pipes, buffers, caches, forwards Range data, or returns media bytes.
+  app.get('/api/media', async (req, res, next) => {
     try {
       const mediaPath = cleanMediaPath(req.query.path);
       if (!mediaPath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
       const extension = path.extname(mediaPath).toLowerCase();
-      if (!VIDEO_EXTENSIONS.has(extension)) return res.status(400).json({ ok: false, error: '该文件不是支持的视频类型' });
-      const directUrl = currentWebDav().directUrl(mediaPath);
+      if (!VIDEO_EXTENSIONS.has(extension)) {
+        return res.status(400).json({ ok: false, error: '该文件不是支持的视频类型' });
+      }
+      const playable = await currentWebDav().resolvePlayable(mediaPath);
       res.set('Cache-Control', 'private, no-store');
       res.set('Referrer-Policy', 'no-referrer');
-      res.status(302).set('Location', directUrl).end();
+      res.set('X-TogetherVideo-Media-Mode', 'browser-direct');
+      res.status(302).set('Location', playable.url).end();
     } catch (error) { next(error); }
   });
 
-  io.use((socket, next) => socket.request.session?.authenticated ? next() : next(new Error('unauthorized')));
+  io.use((socket, next) => (
+    socket.request.session?.authenticated ? next() : next(new Error('unauthorized'))
+  ));
 
   io.on('connection', (socket) => {
     const session = socket.request.session || {};
@@ -247,12 +262,17 @@ async function main() {
   app.use((error, _req, res, _next) => {
     const status = error instanceof WebDavError ? error.status : Number(error.status || 500);
     if (status >= 500) console.error('[http]', error);
-    res.status(status).json({ ok: false, error: error.message || '服务器错误' });
+    res.status(status).json({
+      ok: false,
+      error: error.message || '服务器错误',
+      code: error.code || undefined,
+    });
   });
 
   server.listen(config.port, config.host, () => {
     console.log(`[TogetherVideo 2.0] listening on ${config.host}:${config.port}`);
     console.log('[TogetherVideo 2.0] fixed two-person room; no room codes');
+    console.log('[TogetherVideo 2.0] WebDAV is used only for metadata and direct-link discovery');
     console.log('[TogetherVideo 2.0] media bytes are never proxied by this server');
   });
 }
