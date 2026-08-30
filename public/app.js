@@ -34,7 +34,9 @@ const state = {
   sourceLoading: false,
   mediaReady: false,
   buffering: false,
+  lastBufferAt: 0,
   lastHardSeekAt: 0,
+  forceSyncOnce: false,
   compatMode: localStorage.getItem('together_play_mode') === 'compat',
   expectedSeq: 0,
   expected: { play: [], pause: [], seek: [], rate: [] },
@@ -172,18 +174,19 @@ function cancelRateCorrection(restoreRate = null) {
   if (restoreRate != null && state.mediaReady) programmaticRate(restoreRate);
 }
 
-function startRateCorrection(baseRate, direction) {
+function startRateCorrection(baseRate, direction, drift) {
   if (state.rateCorrectionTimer && state.rateCorrectionDirection === direction && Math.abs(state.rateCorrectionBase - baseRate) < 0.005) return;
   cancelRateCorrection();
   state.rateCorrectionBase = baseRate;
   state.rateCorrectionDirection = direction;
-  const corrected = Math.min(4, Math.max(0.25, baseRate + direction * 0.04));
+  const delta = Math.min(0.08, Math.max(0.03, Number(drift || 0) * 0.015));
+  const corrected = Math.min(4, Math.max(0.25, baseRate + direction * delta));
   programmaticRate(corrected);
   state.rateCorrectionTimer = setTimeout(() => {
     state.rateCorrectionTimer = null;
     state.rateCorrectionDirection = 0;
     if (state.mediaReady) programmaticRate(state.rateCorrectionBase);
-  }, 2500);
+  }, 3000);
 }
 
 function updatePlayModeUI() {
@@ -237,7 +240,10 @@ ui.copyRoomBtn.addEventListener('click', async () => {
 });
 
 ui.refreshLibraryBtn.addEventListener('click', () => loadLibrary(state.libraryPath));
-ui.syncNowBtn.addEventListener('click', () => state.socket?.emit('sync:request'));
+ui.syncNowBtn.addEventListener('click', () => {
+  state.forceSyncOnce = true;
+  state.socket?.emit('sync:request');
+});
 ui.compatModeBtn?.addEventListener('click', async () => {
   state.compatMode = !state.compatMode;
   localStorage.setItem('together_play_mode', state.compatMode ? 'compat' : 'original');
@@ -459,6 +465,7 @@ async function loadMedia(mediaPath, mediaName, mediaVersion) {
   state.mediaPath = mediaPath;
   state.mediaName = mediaName || mediaPath.split('/').pop();
   state.mediaVersion = Number(mediaVersion || 0);
+  state.forceSyncOnce = false;
   ui.mediaTitle.textContent = state.mediaName;
   ui.emptyPlayer.classList.add('hidden');
   ui.resumeOverlay.classList.add('hidden');
@@ -561,17 +568,21 @@ function applyPlayback(snapshot, initial = false) {
   ui.driftBadge.textContent = drift < 0.35 ? '已同步' : `偏差 ${drift.toFixed(1)}s`;
 
   const now = Date.now();
+  const recentlyBuffered = now - state.lastBufferAt < 8000;
   const canSoftCorrect = !state.buffering && !ui.video.seeking && ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
   const canHardCorrect = !state.buffering && !ui.video.seeking && ui.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+  const forceHard = state.forceSyncOnce;
 
-  if (initial) {
+  if (initial || forceHard) {
+    state.forceSyncOnce = false;
+    cancelRateCorrection(desiredRate);
     if (drift > 0.2 && programmaticSeek(target)) state.lastHardSeekAt = now;
-  } else if (drift > 2.5 && canHardCorrect && now - state.lastHardSeekAt > 4000) {
+  } else if (drift > 3 && canHardCorrect && !recentlyBuffered && now - state.lastHardSeekAt > 5000) {
     cancelRateCorrection(desiredRate);
     if (programmaticSeek(target)) state.lastHardSeekAt = now;
-  } else if (drift > 0.45 && drift <= 2.5 && snapshot.playing && canSoftCorrect) {
+  } else if (drift > 0.45 && snapshot.playing && canSoftCorrect) {
     const direction = ui.video.currentTime < target ? 1 : -1;
-    startRateCorrection(desiredRate, direction);
+    startRateCorrection(desiredRate, direction, drift);
   } else if (drift < 0.25 && state.rateCorrectionTimer) {
     cancelRateCorrection(desiredRate);
   }
@@ -592,6 +603,11 @@ ui.resumeOverlay.addEventListener('click', () => {
 ui.video.addEventListener('play', () => {
   if (state.sourceLoading || !state.mediaReady) return;
   if (consumeExpected('play')) return;
+  if (state.lastServerState?.playing) {
+    state.socket?.emit('sync:request');
+    return;
+  }
+  state.lastServerState = { ...(state.lastServerState || {}), playing: true, position: ui.video.currentTime };
   state.socket?.emit('player:play', mediaPayload({ position: ui.video.currentTime }));
 });
 
@@ -599,6 +615,8 @@ ui.video.addEventListener('pause', () => {
   if (state.sourceLoading || !state.mediaReady) return;
   if (consumeExpected('pause')) return;
   if (ui.video.ended || document.hidden) return;
+  if (state.lastServerState && !state.lastServerState.playing) return;
+  state.lastServerState = { ...(state.lastServerState || {}), playing: false, position: ui.video.currentTime };
   state.socket?.emit('player:pause', mediaPayload({ position: ui.video.currentTime }));
 });
 
@@ -650,6 +668,7 @@ ui.video.addEventListener('playing', () => {
 ui.video.addEventListener('waiting', () => {
   if (!state.mediaPath || state.sourceLoading) return;
   state.buffering = true;
+  state.lastBufferAt = Date.now();
   cancelRateCorrection(desiredRoomRate());
   setNotice(state.compatMode ? '兼容流正在缓冲…不会反复跳进度，等待夸克 CDN 恢复。' : '原画正在缓冲…不会反复跳进度，等待夸克 CDN 恢复。');
 });
@@ -657,6 +676,7 @@ ui.video.addEventListener('waiting', () => {
 ui.video.addEventListener('stalled', () => {
   if (!state.mediaPath || state.sourceLoading) return;
   state.buffering = true;
+  state.lastBufferAt = Date.now();
   cancelRateCorrection(desiredRoomRate());
   setNotice(state.compatMode ? '兼容流网络停滞，正在等待夸克 CDN…' : '原画直链网络停滞，正在等待夸克 CDN…');
 });
@@ -665,6 +685,7 @@ ui.video.addEventListener('ended', () => {
   if (!state.mediaPath || !state.mediaReady) return;
   cancelRateCorrection();
   const position = Number.isFinite(ui.video.duration) ? ui.video.duration : ui.video.currentTime;
+  state.lastServerState = { ...(state.lastServerState || {}), playing: false, position };
   state.socket?.emit('player:pause', mediaPayload({ position, reason: 'ended' }));
 });
 
