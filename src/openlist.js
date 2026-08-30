@@ -4,8 +4,17 @@ class OpenListError extends Error {
   constructor(message, status = 502, details = null) { super(message); this.name = 'OpenListError'; this.status = status; this.details = details; }
 }
 
+function normalizeRoot(value) {
+  let root = String(value || '/').trim().replace(/\\/g, '/');
+  if (!root.startsWith('/')) root = `/${root}`;
+  root = path.posix.normalize(root);
+  if (root.length > 1) root = root.replace(/\/$/, '');
+  return root;
+}
+
 class OpenListClient {
-  constructor(options) { Object.assign(this, options); }
+  constructor(options) { Object.assign(this, options); this.root = normalizeRoot(this.root); }
+  setRoot(root) { this.root = normalizeRoot(root); return this.root; }
   resolveRelative(relative = '') {
     const cleaned = String(relative || '').replace(/\\/g, '/').replace(/^\/+/, '');
     const full = path.posix.normalize(path.posix.join(this.root, cleaned));
@@ -62,7 +71,7 @@ class OpenListClient {
       const sign = data?.sign ? `?sign=${encodeURIComponent(data.sign)}` : '';
       return { url: `${this.publicUrl}/d${encoded}${sign}`, name: data?.name || path.posix.basename(fullPath), provider: data?.provider || '', headers: data?.header || {}, mode: 'openlist-download' };
     }
-    throw new OpenListError('OpenList 没有返回可播放直链；请检查 QuarkTV/302 配置或设置 OPENLIST_PUBLIC_URL', 502);
+    throw new OpenListError('OpenList 没有返回可播放直链；请在设置里重新授权 QuarkTV。', 502);
   }
 }
 module.exports = { OpenListClient, OpenListError };
