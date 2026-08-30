@@ -19,7 +19,7 @@ module.exports = {
   sitePassword: process.env.SITE_PASSWORD || 'change-me',
   cookieSecure: bool('COOKIE_SECURE', false),
   trustProxy: bool('TRUST_PROXY', true),
-  maxParticipants: Math.max(2, integer('MAX_PARTICIPANTS', 2)),
+  maxParticipants: 2,
   dataDir,
   settingsFile: path.join(dataDir, 'settings.json'),
   stateFile: path.join(dataDir, 'watch-state.json'),
