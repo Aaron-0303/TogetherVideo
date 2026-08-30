@@ -307,7 +307,6 @@ function loadMedia(snapshot) {
   state.mediaVersion = Number(snapshot.mediaVersion || 0);
   state.sourceLoading = true;
   state.mediaReady = false;
-  state.buffering = false;
   clearCorrection(false);
   setBuffering(false);
   ui.mediaTitle.textContent = snapshot.media.name || snapshot.media.path.split('/').pop();
@@ -324,11 +323,11 @@ function loadMedia(snapshot) {
   ui.video.load();
 
   const onReady = () => {
+    ui.video.removeEventListener('loadedmetadata', onReady);
     if (seq !== state.loadSeq) return;
     state.sourceLoading = false;
     state.mediaReady = true;
     setNotice('');
-    ui.video.removeEventListener('loadedmetadata', onReady);
     requestSync(true);
     refreshActiveLibraryItem();
   };
@@ -360,12 +359,16 @@ function applyPlayback(snapshot, force = false) {
   const current = Number(ui.video.currentTime || 0);
   const drift = current - target;
   const absDrift = Math.abs(drift);
+  const explicitSeek = snapshot.reason === 'seek';
+  const pausedAlignment = !snapshot.playing && absDrift > 0.15;
 
-  if (force && !state.buffering) {
+  if (force || explicitSeek || pausedAlignment) {
     clearCorrection(false);
-    if (absDrift > 0.18) setProgrammaticSeek(target);
+    setProgrammaticRate(desiredRate);
+    if (absDrift > 0.12) setProgrammaticSeek(target);
   } else if (!state.buffering && absDrift > 1.8 && Date.now() - state.lastHardSeekAt > 6000) {
     clearCorrection(false);
+    setProgrammaticRate(desiredRate);
     setProgrammaticSeek(target);
   } else if (!state.buffering && snapshot.playing && absDrift > 0.35) {
     const adjust = Math.min(0.06, Math.max(0.02, absDrift * 0.03));
