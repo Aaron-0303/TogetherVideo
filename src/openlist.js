@@ -12,9 +12,26 @@ function normalizeRoot(value) {
   return root;
 }
 
+function looksLikeAuthError(message = '') {
+  return /guest user is disabled|login please|unauthorized|token|登录|未授权/i.test(String(message));
+}
+
 class OpenListClient {
-  constructor(options) { Object.assign(this, options); this.root = normalizeRoot(this.root); }
+  constructor(options) {
+    Object.assign(this, options);
+    this.root = normalizeRoot(this.root);
+    this.tokenProvider = null;
+  }
   setRoot(root) { this.root = normalizeRoot(root); return this.root; }
+  setTokenProvider(provider) { this.tokenProvider = provider; }
+  async ensureToken(force = false) {
+    if (force) this.token = '';
+    if (!this.token && typeof this.tokenProvider === 'function') {
+      const token = await this.tokenProvider(force);
+      if (token) this.token = token;
+    }
+    return this.token;
+  }
   resolveRelative(relative = '') {
     const cleaned = String(relative || '').replace(/\\/g, '/').replace(/^\/+/, '');
     const full = path.posix.normalize(path.posix.join(this.root, cleaned));
@@ -27,15 +44,21 @@ class OpenListClient {
     const boundary = this.root === '/' ? '/' : `${this.root}/`;
     return fullPath.startsWith(boundary) ? fullPath.slice(boundary.length) : '';
   }
-  async request(endpoint, body) {
+  async request(endpoint, body, retry = true) {
+    await this.ensureToken(false);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const headers = { 'Content-Type': 'application/json' };
     if (this.token) headers.Authorization = this.token;
     try {
       const response = await fetch(`${this.baseUrl}${endpoint}`, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
-      if (!response.ok) throw new OpenListError(`OpenList HTTP ${response.status}`, 502);
-      const json = await response.json();
+      const json = await response.json().catch(() => ({}));
+      const message = json.message || `OpenList HTTP ${response.status}`;
+      if ((!response.ok || json.code !== 200) && retry && typeof this.tokenProvider === 'function' && looksLikeAuthError(message)) {
+        await this.ensureToken(true);
+        return this.request(endpoint, body, false);
+      }
+      if (!response.ok) throw new OpenListError(`OpenList HTTP ${response.status}`, 502, json);
       if (json.code !== 200) throw new OpenListError(json.message || 'OpenList 请求失败', 502, json);
       return json.data;
     } catch (error) {
