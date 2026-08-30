@@ -14,6 +14,16 @@ const JsonStore = require('./src/store');
 const { RoomManager, cleanName } = require('./src/rooms');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.m3u8', '.ts']);
+const PLAY_LINK_TTL_MS = 60_000;
+
+function classifyDelivery(url, fallbackExtension = '') {
+  const value = String(url || '').toLowerCase();
+  let pathname = value;
+  try { pathname = new URL(value).pathname.toLowerCase(); } catch {}
+  if (pathname.endsWith('.m3u8') || value.includes('.m3u8?') || value.includes('format=m3u8')) return 'hls';
+  if (String(fallbackExtension).toLowerCase() === '.m3u8') return 'hls';
+  return 'file';
+}
 
 async function main() {
   const store = new JsonStore(config.dataFile);
@@ -35,6 +45,43 @@ async function main() {
       if (migrated?.ready) console.log(`[TogetherVideo] QuarkTV default playback mode: ${migrated.playMode || 'download'}`);
     } catch (error) {
       console.warn('[TogetherVideo] unable to restore QuarkTV download mode:', error.message);
+    }
+  }
+
+  // Browsers can issue several range/resource requests for the same media URL. Resolving a
+  // QuarkTV link on every request is expensive, and compat mode would otherwise repeatedly
+  // toggle the OpenList driver. Cache only the short-lived resolved redirect URL, never bytes.
+  const playLinkCache = new Map();
+  const clearPlayLinkCache = () => playLinkCache.clear();
+  async function resolvePlayLink(relativePath, mode) {
+    const key = `${openlist.root}\n${mode}\n${relativePath}`;
+    const now = Date.now();
+    const cached = playLinkCache.get(key);
+    if (cached?.value && cached.expiresAt > now) return cached.value;
+    if (cached?.promise) return cached.promise;
+
+    const promise = (async () => {
+      const requestedMode = mode === 'compat' ? 'streaming' : 'download';
+      const resolve = () => openlist.resolvePlayable(relativePath);
+      const playable = config.openlistAdminPassword
+        ? await openlistAdmin.withPlayMode(requestedMode, resolve)
+        : await resolve();
+      const extension = path.extname(path.posix.basename(relativePath)).toLowerCase();
+      return {
+        playable,
+        delivery: classifyDelivery(playable.url, extension),
+        extension,
+      };
+    })();
+
+    playLinkCache.set(key, { promise, expiresAt: now + PLAY_LINK_TTL_MS });
+    try {
+      const value = await promise;
+      playLinkCache.set(key, { value, expiresAt: Date.now() + PLAY_LINK_TTL_MS });
+      return value;
+    } catch (error) {
+      playLinkCache.delete(key);
+      throw error;
     }
   }
 
@@ -96,18 +143,24 @@ async function main() {
   });
 
   app.post('/api/setup/quark/start', async (_req, res, next) => {
-    try { res.json({ ok: true, quark: await openlistAdmin.createQuark() }); }
-    catch (error) { next(error); }
+    try {
+      clearPlayLinkCache();
+      res.json({ ok: true, quark: await openlistAdmin.createQuark() });
+    } catch (error) { next(error); }
   });
 
   app.post('/api/setup/quark/finish', async (_req, res, next) => {
-    try { res.json({ ok: true, quark: await openlistAdmin.finishQuark() }); }
-    catch (error) { next(error); }
+    try {
+      clearPlayLinkCache();
+      res.json({ ok: true, quark: await openlistAdmin.finishQuark() });
+    } catch (error) { next(error); }
   });
 
   app.post('/api/setup/quark/reset', async (_req, res, next) => {
-    try { res.json({ ok: true, quark: await openlistAdmin.resetQuark() }); }
-    catch (error) { next(error); }
+    try {
+      clearPlayLinkCache();
+      res.json({ ok: true, quark: await openlistAdmin.resetQuark() });
+    } catch (error) { next(error); }
   });
 
   app.post('/api/settings', async (req, res, next) => {
@@ -115,6 +168,7 @@ async function main() {
       const result = {};
       if (req.body?.mediaRoot != null) {
         const root = openlist.setRoot(String(req.body.mediaRoot || '/QuarkTV'));
+        clearPlayLinkCache();
         await settings.set({ mediaRoot: root });
         result.mediaRoot = root;
       }
@@ -140,31 +194,31 @@ async function main() {
     try {
       const relativePath = String(req.query.path || '');
       if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
-      const requestedMode = String(req.query.mode || 'original') === 'compat' ? 'streaming' : 'download';
-      const resolve = () => openlist.resolvePlayable(relativePath);
-      const playable = config.openlistAdminPassword
-        ? await openlistAdmin.withPlayMode(requestedMode, resolve)
-        : await resolve();
-      const headerNames = Object.keys(playable.headers || {});
-      if (headerNames.length) console.warn(`[play] provider headers: ${headerNames.join(', ')}`);
+      const mode = String(req.query.mode || 'original') === 'compat' ? 'compat' : 'original';
+      const { playable } = await resolvePlayLink(relativePath, mode);
+      const headerNames = playable.headers && typeof playable.headers === 'object' ? Object.keys(playable.headers) : [];
+      if (headerNames.length) console.warn(`[play] provider headers ignored by redirect: ${headerNames.join(', ')}`);
       res.set('Cache-Control', 'private, no-store');
       res.redirect(302, playable.url);
     } catch (error) { next(error); }
   });
 
-  app.get('/api/play-info', (req, res) => {
-    const relativePath = String(req.query.path || '');
-    if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
-    const mode = String(req.query.mode || 'original') === 'compat' ? 'compat' : 'original';
-    const name = path.posix.basename(relativePath);
-    const extension = path.extname(name).toLowerCase();
-    res.json({
-      ok: true,
-      name,
-      extension,
-      mode,
-      playUrl: `/api/play?path=${encodeURIComponent(relativePath)}&mode=${mode}`,
-    });
+  app.get('/api/play-info', async (req, res, next) => {
+    try {
+      const relativePath = String(req.query.path || '');
+      if (!relativePath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
+      const mode = String(req.query.mode || 'original') === 'compat' ? 'compat' : 'original';
+      const name = path.posix.basename(relativePath);
+      const resolved = await resolvePlayLink(relativePath, mode);
+      res.json({
+        ok: true,
+        name,
+        extension: resolved.extension,
+        delivery: resolved.delivery,
+        mode,
+        playUrl: `/api/play?path=${encodeURIComponent(relativePath)}&mode=${mode}`,
+      });
+    } catch (error) { next(error); }
   });
 
   const publicDir = path.join(process.cwd(), 'public');
@@ -202,7 +256,7 @@ async function main() {
     console.log(`[TogetherVideo] listening on ${config.host}:${config.port}`);
     console.log(`[TogetherVideo] OpenList: ${config.openlist.baseUrl}, media root: ${openlist.root}`);
     console.log('[TogetherVideo] media mode: original download by default; compat streaming is resolved per client');
-    console.log('[TogetherVideo] video bytes are never proxied by this app');
+    console.log('[TogetherVideo] resolved links are cached briefly; video bytes are never proxied by this app');
     if (!settings.publicSettings().passwordChanged) {
       console.warn('[TogetherVideo] first login password is "change-me"; change it in Settings immediately.');
     }
