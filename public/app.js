@@ -35,6 +35,7 @@ const state = {
   mediaReady: false,
   buffering: false,
   lastBufferAt: 0,
+  lastSeekActivityAt: 0,
   lastHardSeekAt: 0,
   forceSyncOnce: false,
   compatMode: localStorage.getItem('together_play_mode') === 'compat',
@@ -84,6 +85,17 @@ function roomFromUrl() { return new URLSearchParams(location.search).get('room')
 function normalizeRoom(room) { return String(room || 'ours').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'ours'; }
 function playMode() { return state.compatMode ? 'compat' : 'original'; }
 function desiredRoomRate() { return Number(state.lastServerState?.rate || 1); }
+
+function emitNow(event, payload, ack) {
+  if (!state.socket?.connected) return false;
+  if (typeof ack === 'function') state.socket.emit(event, payload, ack);
+  else state.socket.emit(event, payload);
+  return true;
+}
+
+function requestSync() {
+  return emitNow('sync:request');
+}
 
 function addExpected(type, value = null, ttl = 2000) {
   const token = { id: ++state.expectedSeq, value, timer: null };
@@ -241,8 +253,9 @@ ui.copyRoomBtn.addEventListener('click', async () => {
 
 ui.refreshLibraryBtn.addEventListener('click', () => loadLibrary(state.libraryPath));
 ui.syncNowBtn.addEventListener('click', () => {
+  if (!state.socket?.connected) return setNotice('当前正在重连，连接恢复后会自动同步。');
   state.forceSyncOnce = true;
-  state.socket?.emit('sync:request');
+  requestSync();
 });
 ui.compatModeBtn?.addEventListener('click', async () => {
   state.compatMode = !state.compatMode;
@@ -373,6 +386,7 @@ function connectSocket() {
   socket.on('disconnect', () => {
     ui.connectionBadge.textContent = '重连中';
     ui.connectionBadge.classList.remove('online');
+    cancelRateCorrection(desiredRoomRate());
   });
   socket.on('connect_error', (error) => {
     ui.connectionBadge.textContent = '连接失败';
@@ -389,7 +403,7 @@ function connectSocket() {
   socket.on('reaction:show', showReaction);
   clearInterval(state.syncTimer);
   state.syncTimer = setInterval(() => {
-    if (socket.connected && state.mediaPath) socket.emit('sync:request');
+    if (socket.connected && state.mediaPath) requestSync();
   }, 5000);
 }
 
@@ -453,7 +467,9 @@ function renderBreadcrumbs(relativePath) {
 }
 
 function selectMedia(item) {
-  state.socket?.emit('player:media', { mediaPath: item.relativePath, mediaName: item.name });
+  if (!emitNow('player:media', { mediaPath: item.relativePath, mediaName: item.name })) {
+    setNotice('当前正在重连，暂时不能切换剧集。');
+  }
 }
 
 async function loadMedia(mediaPath, mediaName, mediaVersion) {
@@ -582,7 +598,10 @@ function applyPlayback(snapshot, initial = false) {
     if (programmaticSeek(target)) state.lastHardSeekAt = now;
   } else if (drift > 0.45 && snapshot.playing && canSoftCorrect) {
     const direction = ui.video.currentTime < target ? 1 : -1;
-    startRateCorrection(desiredRate, direction, drift);
+    // A client that has just buffered needs time to refill its buffer. Speeding it up
+    // immediately can cause a buffer -> catch-up -> buffer loop, so only slow down an
+    // ahead client during the recovery window.
+    if (!recentlyBuffered || direction < 0) startRateCorrection(desiredRate, direction, drift);
   } else if (drift < 0.25 && state.rateCorrectionTimer) {
     cancelRateCorrection(desiredRate);
   }
@@ -604,27 +623,37 @@ ui.video.addEventListener('play', () => {
   if (state.sourceLoading || !state.mediaReady) return;
   if (consumeExpected('play')) return;
   if (state.lastServerState?.playing) {
-    state.socket?.emit('sync:request');
+    requestSync();
     return;
   }
+  if (!state.socket?.connected) return setNotice('当前正在重连，播放状态不会发送给对方。');
   state.lastServerState = { ...(state.lastServerState || {}), playing: true, position: ui.video.currentTime };
-  state.socket?.emit('player:play', mediaPayload({ position: ui.video.currentTime }));
+  emitNow('player:play', mediaPayload({ position: ui.video.currentTime }));
 });
 
 ui.video.addEventListener('pause', () => {
   if (state.sourceLoading || !state.mediaReady) return;
   if (consumeExpected('pause')) return;
-  if (ui.video.ended || document.hidden) return;
+  if (ui.video.ended || document.hidden || ui.video.seeking) return;
+  if (Date.now() - state.lastSeekActivityAt < 300) return;
   if (state.lastServerState && !state.lastServerState.playing) return;
+  if (!state.socket?.connected) return setNotice('当前正在重连，暂停状态不会发送给对方。');
   state.lastServerState = { ...(state.lastServerState || {}), playing: false, position: ui.video.currentTime };
-  state.socket?.emit('player:pause', mediaPayload({ position: ui.video.currentTime }));
+  emitNow('player:pause', mediaPayload({ position: ui.video.currentTime }));
+});
+
+ui.video.addEventListener('seeking', () => {
+  if (!state.sourceLoading && state.mediaReady) state.lastSeekActivityAt = Date.now();
 });
 
 ui.video.addEventListener('seeked', () => {
   if (state.sourceLoading || !state.mediaReady) return;
+  state.lastSeekActivityAt = Date.now();
   if (consumeExpected('seek', ui.video.currentTime, 0.4)) return;
   cancelRateCorrection(desiredRoomRate());
-  state.socket?.emit('player:seek', mediaPayload({ position: ui.video.currentTime }));
+  if (!emitNow('player:seek', mediaPayload({ position: ui.video.currentTime }))) {
+    setNotice('当前正在重连，本次拖动不会同步给对方。');
+  }
 });
 
 ui.video.addEventListener('ratechange', () => {
@@ -635,7 +664,9 @@ ui.video.addEventListener('ratechange', () => {
     state.rateCorrectionTimer = null;
     state.rateCorrectionDirection = 0;
   }
-  state.socket?.emit('player:rate', mediaPayload({ rate: ui.video.playbackRate }));
+  if (!emitNow('player:rate', mediaPayload({ rate: ui.video.playbackRate }))) {
+    setNotice('当前正在重连，本次倍速调整不会同步给对方。');
+  }
 });
 
 ui.video.addEventListener('loadedmetadata', () => {
@@ -644,8 +675,14 @@ ui.video.addEventListener('loadedmetadata', () => {
   state.mediaReady = true;
   state.buffering = false;
   if (/正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
-  if (state.lastServerState) applyPlayback(state.lastServerState, true);
-  state.socket?.emit('sync:request');
+  // The snapshot that triggered this media load can already be several seconds old by
+  // the time Quark resolves the URL. Prefer a fresh authoritative snapshot before seeking.
+  if (state.socket?.connected) {
+    state.forceSyncOnce = true;
+    requestSync();
+  } else if (state.lastServerState) {
+    applyPlayback(state.lastServerState, true);
+  }
 });
 
 ui.video.addEventListener('canplay', () => {
@@ -655,8 +692,8 @@ ui.video.addEventListener('canplay', () => {
   state.buffering = false;
   if (/缓冲|网络停滞|正在获取夸克/.test(ui.playerNotice.textContent)) setNotice('');
   if (recovered) {
-    state.socket?.emit('sync:request');
-    if (state.lastServerState) applyPlayback(state.lastServerState, false);
+    if (state.socket?.connected) requestSync();
+    else if (state.lastServerState) applyPlayback(state.lastServerState, false);
   }
 });
 
@@ -686,7 +723,7 @@ ui.video.addEventListener('ended', () => {
   cancelRateCorrection();
   const position = Number.isFinite(ui.video.duration) ? ui.video.duration : ui.video.currentTime;
   state.lastServerState = { ...(state.lastServerState || {}), playing: false, position };
-  state.socket?.emit('player:pause', mediaPayload({ position, reason: 'ended' }));
+  emitNow('player:pause', mediaPayload({ position, reason: 'ended' }));
 });
 
 ui.video.addEventListener('error', () => {
@@ -705,7 +742,7 @@ document.addEventListener('visibilitychange', () => {
     cancelRateCorrection(desiredRoomRate());
     return;
   }
-  if (state.socket?.connected && state.mediaPath) state.socket.emit('sync:request');
+  if (state.socket?.connected && state.mediaPath) requestSync();
 });
 
 function renderMessages(messages) {
@@ -731,11 +768,15 @@ ui.chatForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const text = ui.chatInput.value.trim();
   if (!text) return;
-  state.socket?.emit('chat:send', { text }, (result) => { if (result?.ok) ui.chatInput.value = ''; });
+  if (!emitNow('chat:send', { text }, (result) => { if (result?.ok) ui.chatInput.value = ''; })) {
+    setNotice('当前正在重连，消息没有发送。');
+  }
 });
 
 document.querySelectorAll('[data-reaction]').forEach((button) => {
-  button.addEventListener('click', () => state.socket?.emit('reaction:send', { emoji: button.dataset.reaction }));
+  button.addEventListener('click', () => {
+    if (!emitNow('reaction:send', { emoji: button.dataset.reaction })) setNotice('当前正在重连，表情没有发送。');
+  });
 });
 
 function showReaction(payload) {
