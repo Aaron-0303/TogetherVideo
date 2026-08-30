@@ -88,8 +88,8 @@ async function main() {
   io.use((socket, next) => socket.request.session?.authenticated ? next() : next(new Error('unauthorized')));
   new RoomManager({ io, store, defaultRoom: config.defaultRoom, maxRoomUsers: config.maxRoomUsers }).start();
 
-  server.listen(config.port, () => {
-    console.log(`[TogetherVideo] listening on :${config.port}`);
+  server.listen(config.port, config.host, () => {
+    console.log(`[TogetherVideo] listening on ${config.host}:${config.port}`);
     console.log(`[TogetherVideo] OpenList root: ${config.openlist.root}`);
     console.log('[TogetherVideo] media mode: redirect-only (video bytes are never proxied by this app)');
   });
