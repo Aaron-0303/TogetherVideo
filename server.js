@@ -302,7 +302,12 @@ async function main() {
     coordinateBuffering();
 
     socket.on('sync:request', (ack = () => {}) => {
-      if (typeof ack === 'function') ack(room.snapshot());
+      if (typeof ack !== 'function') return;
+      const snapshot = room.snapshot();
+      // A sync poll reports the current timeline only. It must never replay the
+      // last control action (especially `seek`) or clients will seek again on
+      // every periodic reconciliation tick.
+      ack({ ...snapshot, reason: 'sync' });
     });
 
     socket.on('presence:buffering', (payload = {}) => {
@@ -313,10 +318,17 @@ async function main() {
       coordinateBuffering();
     });
 
-    const apply = (action, payload = {}) => {
+    const apply = (action, payload = {}, options = {}) => {
       const snapshot = room.apply(action, payload, nickname);
       if (snapshot) {
-        io.emit('room:state', snapshot);
+        if (options.noSelfEcho) {
+          // The initiator has already sought locally. Acknowledge the revision
+          // without telling it to perform the same seek a second time.
+          socket.emit('room:state', { ...snapshot, reason: `${snapshot.reason}-ack` });
+          socket.broadcast.emit('room:state', snapshot);
+        } else {
+          io.emit('room:state', snapshot);
+        }
         coordinateBuffering();
       }
     };
@@ -328,7 +340,7 @@ async function main() {
     });
     socket.on('player:play', (payload = {}) => apply('play', payload));
     socket.on('player:pause', (payload = {}) => apply('pause', payload));
-    socket.on('player:seek', (payload = {}) => apply('seek', payload));
+    socket.on('player:seek', (payload = {}) => apply('seek', payload, { noSelfEcho: true }));
     socket.on('player:rate', (payload = {}) => apply('rate', payload));
     socket.on('player:wait', () => {
       const snapshot = room.apply('wait', {}, nickname);
