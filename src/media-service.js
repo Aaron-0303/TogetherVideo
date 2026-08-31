@@ -64,10 +64,6 @@ class MediaService {
     const fresh = Boolean(options.fresh);
     const now = Date.now();
 
-    // Signed provider URLs are transport credentials, not application state.
-    // Never force two browsers to share a cached URL when the caller asks for a
-    // fresh transport. This matters for late joiners because some provider/CDN
-    // links can be scoped, short lived or invalidated independently per client.
     if (!fresh) {
       const cached = this.playableCache.get(mediaPath);
       if (cached && cached.expiresAt > now) return cached.playable;
@@ -90,23 +86,22 @@ class MediaService {
   }
 
   async inspectPlayable(mediaPath) {
-    const playable = await this.resolvePlayable(mediaPath);
+    const playable = await this.resolvePlayable(mediaPath, { fresh: true });
     const destination = new URL(playable.url);
-    let last = null;
 
-    for (const method of ['HEAD', 'GET']) {
+    async function probe(method, headers = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 8000);
       try {
         const response = await fetch(destination, {
           method,
-          headers: method === 'GET' ? { Range: 'bytes=0-0' } : {},
+          headers,
           redirect: 'follow',
           signal: controller.signal,
         });
         const contentRange = response.headers.get('content-range') || '';
         const totalMatch = contentRange.match(/\/(\d+)$/);
-        last = {
+        const result = {
           ok: response.ok || response.status === 206,
           status: response.status,
           method,
@@ -117,21 +112,45 @@ class MediaService {
           contentRange,
           contentLength: Number(totalMatch?.[1] || response.headers.get('content-length') || 0),
           contentDisposition: response.headers.get('content-disposition') || '',
-          rangeSupported: response.status === 206
-            || /bytes/i.test(response.headers.get('accept-ranges') || '')
-            || /^bytes\s/i.test(contentRange),
           strategy: playable.strategy,
         };
         await response.body?.cancel().catch(() => {});
-        if (last.ok) return last;
+        return result;
       } catch (error) {
-        last = { ok: false, status: 0, method, error: error.name === 'AbortError' ? 'timeout' : error.message };
+        return {
+          ok: false,
+          status: 0,
+          method,
+          error: error.name === 'AbortError' ? 'timeout' : error.message,
+          strategy: playable.strategy,
+        };
       } finally {
         clearTimeout(timer);
       }
     }
 
-    return last || { ok: false, status: 0, error: 'probe-failed' };
+    // HEAD 200 only says the object exists. It does NOT prove that the CDN will
+    // honor browser byte-range requests. Always perform a real one-byte GET and
+    // require HTTP 206 + Content-Range before reporting Range support.
+    const head = await probe('HEAD');
+    const range = await probe('GET', { Range: 'bytes=0-0' });
+    const rangeVerified = range.status === 206 && /^bytes\s+\d+-\d+\/(?:\d+|\*)$/i.test(range.contentRange || '');
+
+    return {
+      ...range,
+      ok: Boolean(head.ok || range.ok),
+      headStatus: head.status || 0,
+      rangeStatus: range.status || 0,
+      rangeVerified,
+      rangeSupported: rangeVerified,
+      contentLength: Number(range.contentLength || head.contentLength || 0),
+      contentType: range.contentType || head.contentType || '',
+      contentDisposition: range.contentDisposition || head.contentDisposition || '',
+      acceptRanges: range.acceptRanges || head.acceptRanges || '',
+      finalHost: range.finalHost || head.finalHost || destination.hostname,
+      finalProtocol: range.finalProtocol || head.finalProtocol || destination.protocol,
+      headContentType: head.contentType || '',
+    };
   }
 }
 
