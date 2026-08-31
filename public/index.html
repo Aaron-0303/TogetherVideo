@@ -59,7 +59,7 @@
             <div id="emptyPlayer" class="empty-player">
               <span class="play-icon">▶</span>
               <strong>从片库选择视频</strong>
-              <span>视频会从 WebDAV 获取最终直链后直接进入你的浏览器</span>
+              <span>视频由浏览器直接读取 123；本地兼容层会处理移动端 MIME / Range</span>
             </div>
             <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击继续同步播放</button>
           </div>
@@ -95,7 +95,7 @@
   <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
     <div class="settings-card">
       <div class="panel-head"><div><p class="eyebrow">SETTINGS</p><h2>WebDAV 设置</h2></div><button id="closeSettingsBtn" class="ghost" type="button">关闭</button></div>
-      <p class="muted">123 云盘请使用“第三方挂载 / WebDAV”生成的应用密码。服务器只解析目录和最终直链，不转发视频数据。</p>
+      <p class="muted">123 云盘请使用“第三方挂载 / WebDAV”生成的应用密码。服务器只解析目录和跳转地址；视频 Range 数据由浏览器直接从 123 获取。</p>
       <div class="form-grid">
         <label class="full">WebDAV 地址<input id="webdavUrl" placeholder="https://webdav.123pan.cn/webdav" /></label>
         <label>用户名<input id="webdavUsername" autocomplete="username" placeholder="123 云盘账号 / WebDAV 用户名" /></label>
@@ -110,9 +110,10 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+  <script src="/media-transport.js?v=2.0.3"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="/sync-policy.js?v=2.0.2"></script>
   <script src="/app.js?v=2.0.2"></script>
-  <script src="/media-diagnostics.js?v=2.0.2"></script>
+  <script src="/media-diagnostics.js?v=2.0.3"></script>
 </body>
 </html>
