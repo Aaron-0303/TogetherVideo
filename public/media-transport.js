@@ -23,10 +23,8 @@
 
     readyPromise = (async () => {
       try {
-        const registration = await navigator.serviceWorker.register('/sw.js', {
-          scope: '/',
-          updateViaCache: 'none',
-        });
+        // Keep registration options deliberately minimal for older iPadOS/WebKit.
+        const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
         registration.update().catch(() => {});
         await navigator.serviceWorker.ready;
         const controlled = await waitForController();
@@ -42,26 +40,14 @@
     return readyPromise;
   }
 
-  async function sourceUrl(mediaPath, mediaVersion = 0) {
-    const controlled = await ensureReady();
-    const params = new URLSearchParams({
-      path: String(mediaPath || ''),
-      v: String(Number(mediaVersion || 0)),
-    });
-    return controlled
-      ? `/__media/stream?${params.toString()}`
-      : `/api/media?${params.toString()}`;
-  }
-
   window.MediaTransport = {
     ready: ensureReady,
-    sourceUrl,
     supported: () => supported,
     mode: () => mode,
   };
 
-  // Register as early as possible so the first selected movie is already under
-  // Service Worker control on Safari/iOS. Failure is harmless: app.js falls back
-  // to the existing direct redirect route.
+  // Register before app.js starts loading media. If registration is unavailable
+  // (for example plain HTTP on a non-localhost origin), /api/media keeps its old
+  // 307 browser-direct behavior as a fallback.
   ensureReady();
 })();
