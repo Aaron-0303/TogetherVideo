@@ -5,13 +5,17 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const routes = fs.readFileSync(path.join(root, 'src', 'http-routes.js'), 'utf8');
+const worker = fs.readFileSync(path.join(root, 'public', 'sw.js'), 'utf8');
 const unlock = fs.readFileSync(path.join(root, 'public', 'playback-unlock.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public', 'app-3.1.js'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 
-test('browser media bootstrap always resolves a fresh provider URL', () => {
-  assert.match(routes, /app\.get\('\/api\/media\/url'/);
-  assert.match(routes, /resolvePlayable\(mediaPath, \{ fresh: true \}\)/);
+test('browser media bootstrap resolves a fresh provider URL through the 307 worker resolver', () => {
+  assert.match(routes, /app\.get\('\/api\/media'/);
+  assert.match(routes, /resolvePlayable\(checked\.mediaPath, \{ fresh: true \}\)/);
+  assert.match(routes, /res\.status\(307\)\.set\('Location', destination\.toString\(\)\)\.end\(\)/);
+  assert.doesNotMatch(routes, /app\.get\('\/api\/media\/url'/);
+  assert.match(worker, /searchParams\.set\('_swresolve', '1'\)/);
 });
 
 test('late join autoplay rejection falls back to visible muted playback', () => {
