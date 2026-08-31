@@ -13,6 +13,15 @@ const { WebDavClient, WebDavError } = require('./src/webdav');
 const { WatchRoom, cleanMediaPath } = require('./src/watch-room');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.webm', '.mov', '.ogv', '.ogg', '.mkv']);
+const MEDIA_MIME = new Map([
+  ['.mp4', 'video/mp4'],
+  ['.m4v', 'video/x-m4v'],
+  ['.mov', 'video/quicktime'],
+  ['.webm', 'video/webm'],
+  ['.ogv', 'video/ogg'],
+  ['.ogg', 'video/ogg'],
+  ['.mkv', 'video/x-matroska'],
+]);
 const PLAYABLE_CACHE_TTL_MS = 10_000;
 const BUFFERING_PAUSE_DELAY_MS = 1500;
 const BUFFERING_RESUME_DELAY_MS = 800;
@@ -165,6 +174,51 @@ async function main() {
     return playable;
   }
 
+  async function inspectPlayable(mediaPath) {
+    const playable = await resolvePlayable(mediaPath);
+    const destination = new URL(playable.url);
+    let last = null;
+
+    for (const method of ['HEAD', 'GET']) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(destination, {
+          method,
+          headers: method === 'GET' ? { Range: 'bytes=0-0' } : {},
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        const contentRange = response.headers.get('content-range') || '';
+        const totalMatch = contentRange.match(/\/(\d+)$/);
+        last = {
+          ok: response.ok || response.status === 206,
+          status: response.status,
+          method,
+          finalHost: (() => { try { return new URL(response.url || destination).hostname; } catch { return destination.hostname; } })(),
+          finalProtocol: (() => { try { return new URL(response.url || destination).protocol; } catch { return destination.protocol; } })(),
+          contentType: response.headers.get('content-type') || '',
+          acceptRanges: response.headers.get('accept-ranges') || '',
+          contentRange,
+          contentLength: Number(totalMatch?.[1] || response.headers.get('content-length') || 0),
+          contentDisposition: response.headers.get('content-disposition') || '',
+          rangeSupported: response.status === 206
+            || /bytes/i.test(response.headers.get('accept-ranges') || '')
+            || /^bytes\s/i.test(contentRange),
+          strategy: playable.strategy,
+        };
+        await response.body?.cancel().catch(() => {});
+        if (last.ok) return last;
+      } catch (error) {
+        last = { ok: false, status: 0, method, error: error.name === 'AbortError' ? 'timeout' : error.message };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    return last || { ok: false, status: 0, error: 'probe-failed' };
+  }
+
   app.get('/healthz', (_req, res) => res.json({ ok: true, version: '2.0.0' }));
 
   app.post('/api/login', (req, res) => {
@@ -248,8 +302,31 @@ async function main() {
     } catch (error) { next(error); }
   });
 
-  // Strict no-proxy route: it may authenticate to WebDAV only to discover a 302/signed URL.
-  // It never pipes, buffers, caches, forwards Range data, or returns media bytes.
+  app.get('/api/media/check', async (req, res, next) => {
+    try {
+      const mediaPath = cleanMediaPath(req.query.path);
+      if (!mediaPath) return res.status(400).json({ ok: false, error: '缺少视频路径' });
+      const extension = path.extname(mediaPath).toLowerCase();
+      if (!VIDEO_EXTENSIONS.has(extension)) {
+        return res.status(400).json({ ok: false, error: '该文件不是支持的视频类型' });
+      }
+      const probe = await inspectPlayable(mediaPath);
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        ok: true,
+        media: {
+          extension,
+          expectedMime: MEDIA_MIME.get(extension) || '',
+          mobilePreferred: extension === '.mp4' || extension === '.m4v' || extension === '.mov',
+        },
+        probe,
+      });
+    } catch (error) { next(error); }
+  });
+
+  // Strict no-proxy route: it authenticates only to discover a browser-ready
+  // final URL. It never pipes, buffers, caches, forwards Range data, or returns
+  // media bytes. 307 keeps media GET/Range semantics explicit across the hop.
   app.get('/api/media', async (req, res, next) => {
     try {
       const mediaPath = cleanMediaPath(req.query.path);
@@ -269,7 +346,8 @@ async function main() {
       res.set('Cache-Control', 'private, no-store');
       res.set('Referrer-Policy', 'no-referrer');
       res.set('X-TogetherVideo-Media-Mode', 'browser-direct');
-      res.status(302).set('Location', destination.toString()).end();
+      res.set('X-TogetherVideo-Media-Strategy', playable.strategy || 'direct');
+      res.status(307).set('Location', destination.toString()).end();
     } catch (error) { next(error); }
   });
 
