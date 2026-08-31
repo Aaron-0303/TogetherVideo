@@ -23,6 +23,12 @@
     return url.toString();
   }
 
+  function isAppleMobile() {
+    const ua = navigator.userAgent || '';
+    return /iPad|iPhone|iPod/i.test(ua)
+      || (navigator.platform === 'MacIntel' && Number(navigator.maxTouchPoints || 0) > 1);
+  }
+
   function formatTime(seconds) {
     const value = Math.max(0, Number(seconds || 0));
     if (!Number.isFinite(value)) return '00:00';
@@ -47,6 +53,9 @@
       this.avPlayer = null;
       this.avModule = null;
       this.avLoaded = false;
+      this.avFirstFrame = false;
+      this.avStalled = false;
+      this.avLastTime = 0;
       this.avCurrentTime = 0;
       this.avDuration = NaN;
       this.avPaused = true;
@@ -58,6 +67,8 @@
       this.switching = false;
       this.suppressNative = false;
       this.loadToken = 0;
+      this.avResizeObserver = null;
+      this.avResizeHandler = null;
       this._bindNative();
       this._bindControls();
       this._showMode('native');
@@ -100,8 +111,14 @@
       if (!controls) return;
 
       controls.play?.addEventListener('click', () => {
-        if (this.paused) this.play().catch(() => {});
-        else this.pause();
+        if (this.paused) {
+          this.play().catch((error) => {
+            this.avError = { code: 4, message: error?.message || String(error) };
+            this._emit('interactionrequired', { error });
+          });
+        } else {
+          this.pause();
+        }
       });
 
       controls.seek?.addEventListener('input', () => {
@@ -158,10 +175,48 @@
       return module;
     }
 
+    _stopAVResize() {
+      try { this.avResizeObserver?.disconnect(); } catch {}
+      this.avResizeObserver = null;
+      if (this.avResizeHandler) {
+        window.removeEventListener('resize', this.avResizeHandler);
+        window.removeEventListener('orientationchange', this.avResizeHandler);
+      }
+      this.avResizeHandler = null;
+    }
+
+    _startAVResize(player, token) {
+      this._stopAVResize();
+      if (!this.container || !player?.resize) return;
+
+      const resize = () => {
+        if (this.avPlayer !== player || token !== this.loadToken || this.mode !== 'libmedia') return;
+        const rect = this.container.getBoundingClientRect();
+        const width = Math.max(1, Math.round(rect.width || this.container.clientWidth || 1));
+        const height = Math.max(1, Math.round(rect.height || this.container.clientHeight || 1));
+        try { player.resize(width, height); } catch {}
+      };
+
+      this.avResizeHandler = resize;
+      if (typeof ResizeObserver !== 'undefined') {
+        this.avResizeObserver = new ResizeObserver(() => requestAnimationFrame(resize));
+        this.avResizeObserver.observe(this.container);
+      }
+      window.addEventListener('resize', resize, { passive: true });
+      window.addEventListener('orientationchange', resize, { passive: true });
+      requestAnimationFrame(resize);
+      setTimeout(resize, 100);
+      setTimeout(resize, 500);
+    }
+
     async _destroyAVPlayer() {
+      this._stopAVResize();
       const player = this.avPlayer;
       this.avPlayer = null;
       this.avLoaded = false;
+      this.avFirstFrame = false;
+      this.avStalled = false;
+      this.avLastTime = 0;
       if (!player) return;
       try { await player.pause(); } catch {}
       try { await player.destroy(); } catch {}
@@ -170,15 +225,27 @@
 
     _wireAVPlayer(player, Events, token) {
       const active = () => this.avPlayer === player && token === this.loadToken;
-      player.on(Events.LOADING, () => { if (active()) this._emit('waiting'); });
+
+      // libmedia LOADING/PROGRESS are pipeline-stage events, not HTML media
+      // starvation signals. Mapping them to waiting/progress made TogetherVideo's
+      // shared buffering guard oscillate on iPad.
       player.on(Events.LOADED, () => {
         if (!active()) return;
         this.avLoaded = true;
         this.avDuration = Number(player.getDuration?.() || 0n) / 1000;
         this.avEnded = false;
         this._updateControls();
+        this.avResizeHandler?.();
         this._emit('loadedmetadata');
         this._emit('loadeddata');
+        this._emit('canplay');
+      });
+      player.on(Events.FIRST_VIDEO_RENDERED, () => {
+        if (!active()) return;
+        this.avFirstFrame = true;
+        this.avStalled = false;
+        this.avResizeHandler?.();
+        this._emit('firstrender');
         this._emit('canplay');
       });
       player.on(Events.PLAYING, () => {
@@ -198,6 +265,7 @@
       player.on(Events.SEEKING, () => {
         if (!active()) return;
         this.avSeeking = true;
+        this.avStalled = true;
         this._emit('seeking');
         this._emit('waiting');
       });
@@ -205,18 +273,23 @@
         if (!active()) return;
         this.avSeeking = false;
         this._emit('seeked');
-        this._emit('canplay');
       });
       player.on(Events.TIME, (pts) => {
         if (!active()) return;
-        this.avCurrentTime = Number(pts || 0) / 1000;
+        const next = Number(pts || 0) / 1000;
+        const progressed = next > this.avLastTime + 0.015;
+        this.avLastTime = next;
+        this.avCurrentTime = next;
         this._updateControls();
         this._emit('timeupdate');
-        this._emit('progress');
+        if (this.avStalled && progressed && !this.avSeeking) {
+          this.avStalled = false;
+          this._emit('canplay');
+        }
       });
-      player.on(Events.PROGRESS, () => { if (active()) this._emit('progress'); });
       player.on(Events.TIMEOUT, () => {
         if (!active()) return;
+        this.avStalled = true;
         this._emit('waiting');
         this._emit('stalled');
       });
@@ -224,6 +297,7 @@
         if (!active()) return;
         this.avPaused = true;
         this.avEnded = true;
+        this.avStalled = false;
         this.avCurrentTime = Number.isFinite(this.avDuration) ? this.avDuration : this.avCurrentTime;
         this._updateControls();
         this._emit('ended');
@@ -265,6 +339,10 @@
         this.avPaused = true;
         this.avSeeking = false;
         this.avEnded = false;
+        this.avLoaded = false;
+        this.avFirstFrame = false;
+        this.avStalled = false;
+        this.avLastTime = 0;
         this.avError = null;
         this.avRate = previousRate;
         this.avVolume = previousVolume;
@@ -274,14 +352,19 @@
           wasmBaseUrl: WASM_BASE_URL,
           enableHardware: true,
           enableWebCodecs: true,
-          enableWebGPU: true,
+          // WebGL is substantially more mature on iPadOS; keep WebGPU for other
+          // platforms while avoiding an extra rendering variable on Apple mobile.
+          enableWebGPU: !isAppleMobile(),
           enableWorker: true,
           enableAudioWorklet: true,
-          preLoadTime: 30,
+          // libmedia defaults to 4s. 30s caused very long initial/refill waits
+          // and excessive memory pressure for 4K HEVC on iPad.
+          preLoadTime: 4,
           loop: false,
         });
         this.avPlayer = player;
         this._wireAVPlayer(player, Events, token);
+        this._startAVResize(player, token);
 
         await player.load(fallbackSource(source), {
           ext: mediaExtension(source),
@@ -292,12 +375,24 @@
         this.avDuration = Number(player.getDuration?.() || 0n) / 1000;
         player.setVolume(this.avVolume);
         player.setPlaybackRate(Math.min(2, Math.max(0.5, this.avRate)));
+        this.avResizeHandler?.();
         this._updateControls();
         this._emit('fallbackready', { mode: 'libmedia' });
       } finally {
         this.suppressNative = false;
         this.switching = false;
       }
+    }
+
+    async unlock() {
+      if (this.mode !== 'libmedia' || !this.avPlayer?.isSuspended?.()) return true;
+      await this.avPlayer.resume();
+      if (this.avPlayer.isSuspended?.()) {
+        const error = new Error('iPad/iPhone 需要点击播放器后才能启动 HEVC 音视频解码');
+        error.name = 'NotAllowedError';
+        throw error;
+      }
+      return true;
     }
 
     get src() { return this.source; }
@@ -337,7 +432,7 @@
     async play() {
       if (this.mode === 'native') return this.video.play();
       if (!this.avPlayer) throw new Error('兼容播放器尚未就绪');
-      if (this.avPlayer.isSuspended?.()) await this.avPlayer.resume().catch(() => {});
+      if (this.avPlayer.isSuspended?.()) await this.unlock();
       return this.avPlayer.play({ subtitle: false });
     }
 
@@ -400,6 +495,11 @@
       this.avPlayer?.setVolume(volume);
       this._updateControls();
       this._emit('volumechange');
+    }
+
+    getStats() {
+      if (this.mode !== 'libmedia' || !this.avPlayer?.getStats) return null;
+      try { return this.avPlayer.getStats(); } catch { return null; }
     }
 
     addEventListener(...args) { return this.events.addEventListener(...args); }
