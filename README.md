@@ -1,8 +1,8 @@
-# TogetherVideo 3.0
+# TogetherVideo 3.0.1
 
 只供两个人使用的固定房间同步观影网站。
 
-3.0 继续保持最重要的原则：**TogetherVideo 服务器不代理视频数据**。服务器只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频字节仍由 123 云盘/CDN 直接发送到各自浏览器。
+3.0.x 继续保持最重要的原则：**TogetherVideo 服务器不代理视频数据**。服务器只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频字节仍由 123 云盘/CDN 直接发送到各自浏览器。
 
 ## 3.0：稳定播放优先
 
@@ -51,6 +51,206 @@ MP4 + H.264 / AVC + AAC-LC
 ```
 
 HEVC 是否可以原生播放取决于设备、浏览器、MP4 封装与具体 codec 标记。
+
+## 视频需要什么格式才能播放
+
+TogetherVideo 不会在服务器上实时转码，因此 **视频最终能不能播放，取决于浏览器本身是否支持该文件的容器、视频编码、音频编码和封装方式**。
+
+如果片源来源复杂、以后可能出现 H.264、HEVC、AV1、VP9、MKV 等各种格式，建议统一按下面的规则处理。
+
+### 推荐的通用兼容格式
+
+为了尽量同时兼容 iPad / iPhone Safari、Android Chrome、Windows Chrome 等设备，推荐把需要转换的片源统一做成：
+
+```text
+容器：MP4
+视频：H.264 / AVC
+Profile：Main 或 High
+位深：8-bit
+像素格式：yuv420p
+音频：AAC-LC
+声道：Stereo / 2.0 优先
+Fast Start：开启
+```
+
+也就是：
+
+```text
+MP4 + H.264 8-bit yuv420p + AAC-LC + faststart
+```
+
+这是 TogetherVideo 的 **最稳妥兼容目标格式**。
+
+### HEVC / H.265 的特殊情况
+
+HEVC 并不是一定不能播放。Apple 设备可以原生播放很多 HEVC 文件，但 MP4 内部的 HEVC sample entry 很重要。
+
+先检查：
+
+```powershell
+ffprobe -v error -select_streams v:0 `
+  -show_entries stream=codec_name,codec_tag_string,profile,pix_fmt,width,height `
+  -of default=noprint_wrappers=1 `
+  "input.mp4"
+```
+
+如果看到：
+
+```text
+codec_name=hevc
+codec_tag_string=hvc1
+```
+
+可以先直接尝试播放，通常不需要重新编码。
+
+如果看到：
+
+```text
+codec_name=hevc
+codec_tag_string=hev1
+```
+
+在 Apple Safari 上建议先无损重封装成 `hvc1`：
+
+```powershell
+ffmpeg -i "input.mp4" `
+  -map 0:v:0 -map "0:a?" `
+  -c copy `
+  -tag:v:0 hvc1 `
+  -movflags +faststart `
+  "output.hvc1.mp4"
+```
+
+这个操作：
+
+```text
+不会重新编码视频
+不会重新编码音频
+不会降低画质
+不会改变 4K 分辨率
+主要只是重新写 MP4 并将 HEVC 标记改为 hvc1
+```
+
+如果输入文件带有 MJPEG 封面图等额外 video stream，不要使用 `-map 0 -tag:v hvc1`，否则 FFmpeg 可能会尝试把封面图也标记成 `hvc1`。上面的 `-map 0:v:0 -map "0:a?" -tag:v:0 hvc1` 会只保留主视频和音频，更适合网页播放。
+
+### 其他编码格式怎么办
+
+建议按下面的逻辑处理：
+
+| 输入格式 | 建议 |
+| --- | --- |
+| MP4 + H.264 + AAC | 直接播放，通常无需处理 |
+| MP4 + HEVC/H.265 + `hvc1` | Apple 设备可先直接尝试 |
+| MP4 + HEVC/H.265 + `hev1` | 优先无损重封装为 `hvc1` |
+| HEVC 重封装后仍无法播放 | 转成 H.264 + AAC |
+| AV1 | 为最大兼容性建议转 H.264 |
+| VP9 / WebM | 为 Apple / 多设备统一兼容建议转 H.264 MP4 |
+| MKV | 浏览器兼容性不统一；建议转/封装为 MP4 |
+| MPEG-4 Part 2 / Xvid / DivX | 建议转 H.264 |
+| H.264 10-bit / yuv422p / yuv444p | 建议转成 H.264 8-bit yuv420p |
+| DTS / TrueHD 等音频 | 建议转 AAC-LC |
+
+注意：**改文件后缀不等于转码。** 例如把 `.mkv` 改成 `.mp4` 并不会让浏览器自动支持里面的视频编码。
+
+### 检查一个视频到底是什么格式
+
+可以直接使用：
+
+```powershell
+ffprobe -hide_banner "input.mp4"
+```
+
+重点关注：
+
+```text
+Video: h264 / hevc / av1 / vp9 ...
+codec_tag_string=hvc1 / hev1 ...
+pix_fmt=yuv420p / yuv420p10le ...
+Audio: aac / ac3 / dts / truehd ...
+```
+
+### 任意片源转换为通用兼容版
+
+如果不想研究原始编码，最省事的做法就是统一生成 H.264 网页兼容版。
+
+CPU 转码：
+
+```powershell
+ffmpeg -i "input.mkv" `
+  -map 0:v:0 -map "0:a:0?" `
+  -c:v libx264 `
+  -preset medium `
+  -crf 18 `
+  -profile:v high `
+  -pix_fmt yuv420p `
+  -c:a aac `
+  -b:a 192k `
+  -ac 2 `
+  -movflags +faststart `
+  "output.web.mp4"
+```
+
+NVIDIA GPU 转码：
+
+```powershell
+ffmpeg -i "input.mkv" `
+  -map 0:v:0 -map "0:a:0?" `
+  -c:v h264_nvenc `
+  -preset p5 `
+  -tune hq `
+  -rc vbr `
+  -cq 18 `
+  -b:v 0 `
+  -profile:v high `
+  -pix_fmt yuv420p `
+  -c:a aac `
+  -b:a 192k `
+  -ac 2 `
+  -movflags +faststart `
+  "output.web.mp4"
+```
+
+上面的命令 **没有缩放参数**，因此原视频如果是 3840×2160，输出仍然可以保持 3840×2160。HEVC / AV1 → H.264 属于真正的重新编码，不可能做到数学意义上的无损，但 `CRF 18` / `CQ 18` 通常已经是很高的观感质量。
+
+如果输入音频已经确认是普通 AAC-LC，也可以把：
+
+```text
+-c:a aac -b:a 192k -ac 2
+```
+
+替换成：
+
+```text
+-c:a copy
+```
+
+避免重复压缩音频。
+
+### 推荐处理流程
+
+```text
+拿到一个新视频
+      ↓
+ffprobe 检查编码
+      ↓
+MP4 + H.264 + AAC？ ── 是 → 直接使用
+      │
+      否
+      ↓
+HEVC + hev1？ ─────── 是 → 先无损改成 hvc1
+      │                         ↓
+      │                    实机测试 Safari
+      │                         ↓
+      │                       能播 → 使用
+      ↓
+其他格式 / 仍然不能播放
+      ↓
+转成 MP4 + H.264 + AAC-LC + yuv420p
+      ↓
+上传到 123
+      ↓
+TogetherVideo 播放
+```
 
 ## 视频数据链路
 
