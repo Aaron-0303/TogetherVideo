@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const USER_PLAYBACK_RATES = Object.freeze([0.5, 0.75, 1, 1.25, 1.5, 2]);
 
 const ui = {
   loginLayer: $('loginLayer'), loginForm: $('loginForm'), nicknameInput: $('nicknameInput'), passwordInput: $('passwordInput'), loginError: $('loginError'),
@@ -9,6 +10,12 @@ const ui = {
   waitBtn: $('waitBtn'), syncNowBtn: $('syncNowBtn'), rateSelect: $('rateSelect'), selfStatus: $('selfStatus'), selfBuffering: $('selfBuffering'), peerStatus: $('peerStatus'), peerBuffering: $('peerBuffering'), peerDot: $('peerDot'),
   settingsModal: $('settingsModal'), closeSettingsBtn: $('closeSettingsBtn'), webdavUrl: $('webdavUrl'), webdavUsername: $('webdavUsername'), webdavPassword: $('webdavPassword'), webdavRoot: $('webdavRoot'), testWebdavBtn: $('testWebdavBtn'), saveWebdavBtn: $('saveWebdavBtn'), newSitePassword: $('newSitePassword'), saveSitePasswordBtn: $('saveSitePasswordBtn'), settingsNotice: $('settingsNotice'), toast: $('toast'),
 };
+
+// Keep audio pitch natural during the very small temporary rate corrections.
+try {
+  if ('preservesPitch' in ui.video) ui.video.preservesPitch = true;
+  if ('webkitPreservesPitch' in ui.video) ui.video.webkitPreservesPitch = true;
+} catch {}
 
 const player = new HybridMedia({
   video: ui.video,
@@ -39,6 +46,11 @@ const state = {
   syncTimer: null, syncSeq: 0, lastSyncSeq: 0, lastPeerName: '',
   seeking: false, fallbackUnavailable: false,
 };
+
+function isUserPlaybackRate(value) {
+  const rate = Number(value);
+  return Number.isFinite(rate) && USER_PLAYBACK_RATES.some((allowed) => Math.abs(allowed - rate) < 1e-6);
+}
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -283,7 +295,9 @@ function clearCorrection(restore = true) {
 function setProgrammaticRate(rate) {
   const value = Math.min(2, Math.max(0.5, Number(rate || 1)));
   if (Math.abs(player.playbackRate - value) < 0.001) return;
-  state.expectedRate = { value, until: Date.now() + 1500 };
+  // Do not rely on a short timeout here. Safari can delay ratechange events;
+  // matching the actual value is enough to identify a programmatic change.
+  state.expectedRate = { value };
   player.playbackRate = value;
   ui.rateSelect.value = String(Number(state.lastSnapshot?.rate || value));
 }
@@ -418,9 +432,7 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   const drift = current - target;
   const absDrift = Math.abs(drift);
 
-  // v3: while the media pipeline is recovering, do not repeatedly seek or use
-  // playback-rate chasing. Preserve only the authoritative play/pause intent.
-  // Explicit user seeks remain authoritative and are applied immediately.
+  // During recovery, playback continuity wins over timeline precision.
   if (mediaRecovery.shouldFreezeSync() && snapshot.reason !== 'seek') {
     setProgrammaticRate(desiredRate);
     ui.rateSelect.value = String(desiredRate);
@@ -431,7 +443,7 @@ function applyPlayback(snapshot, force = false, sampled = false) {
     return;
   }
 
-  const decision = syncReconciler.decide({
+  let decision = syncReconciler.decide({
     drift,
     desiredRate,
     playing: snapshot.playing,
@@ -440,6 +452,17 @@ function applyPlayback(snapshot, force = false, sampled = false) {
     force,
     reason: snapshot.reason,
   });
+
+  // QoE-first: speeding up a client with almost no buffered media is likely to
+  // create a visible stall. Keep normal speed and wait for buffer instead.
+  if (decision.action === 'rate' && decision.rate > desiredRate) {
+    const bufferedAhead = Number(player.getBufferedAhead?.());
+    if (Number.isFinite(bufferedAhead) && bufferedAhead < 3) {
+      syncReconciler.stopCorrection?.({ cooldown: true });
+      setProgrammaticRate(desiredRate);
+      decision = { ...decision, action: 'observe', reason: 'buffer-first' };
+    }
+  }
 
   if (decision.action === 'seek') {
     setProgrammaticRate(desiredRate);
@@ -453,12 +476,14 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   ui.rateSelect.value = String(desiredRate);
   const engine = player.mode === 'libmedia' ? ' · 兼容' : '';
   if (state.buffering) ui.syncBadge.textContent = `缓冲中${engine} · 差 ${absDrift.toFixed(1)}s`;
-  else if (absDrift <= 0.4) ui.syncBadge.textContent = `已对轴${engine}`;
-  else if (absDrift < 1.2) ui.syncBadge.textContent = `同步稳定${engine} · 差 ${absDrift.toFixed(1)}s`;
-  else if (decision.action === 'rate' || decision.action === 'preserve') ui.syncBadge.textContent = `平滑校准${engine} · 差 ${absDrift.toFixed(1)}s`;
+  else if (decision.reason === 'buffer-first') ui.syncBadge.textContent = `缓存优先${engine} · 暂不加速`;
+  else if (decision.reason === 'runaway') ui.syncBadge.textContent = `异常漂移${engine} · 已重新对轴`;
+  else if (absDrift <= 0.75) ui.syncBadge.textContent = `观感同步${engine}`;
+  else if (absDrift < 1.5 && decision.action !== 'rate') ui.syncBadge.textContent = `观感优先${engine} · 差 ${absDrift.toFixed(1)}s`;
+  else if (decision.action === 'rate' || decision.action === 'preserve') ui.syncBadge.textContent = `轻微校准${engine} · 差 ${absDrift.toFixed(1)}s`;
   else if (decision.action === 'seek') ui.syncBadge.textContent = `已重新对轴${engine}`;
   else ui.syncBadge.textContent = `观察偏差${engine} · ${absDrift.toFixed(1)}s`;
-  ui.syncBadge.classList.toggle('good', absDrift <= 0.6 && !state.buffering);
+  ui.syncBadge.classList.toggle('good', absDrift <= 0.75 && !state.buffering);
 
   if (snapshot.playing) setProgrammaticPlay();
   else setProgrammaticPause();
@@ -653,14 +678,20 @@ player.addEventListener('seeked', () => {
 
 player.addEventListener('ratechange', () => {
   if (state.sourceLoading || !state.mediaPath) return;
+  const currentRate = Number(player.playbackRate || 1);
   const expected = state.expectedRate;
-  if (expected && Date.now() <= expected.until && Math.abs(player.playbackRate - expected.value) < 0.01) {
+
+  // Programmatic sync rates are local implementation details. Never publish them
+  // as a room rate, even if Safari delays ratechange for several seconds.
+  if (expected && Math.abs(currentRate - expected.value) < 0.01) {
     state.expectedRate = null;
     return;
   }
   state.expectedRate = null;
+  if (!isUserPlaybackRate(currentRate)) return;
+
   clearCorrection(false);
-  emitControl('player:rate', mediaPayload({ rate: player.playbackRate }));
+  emitControl('player:rate', mediaPayload({ rate: currentRate }));
 });
 
 player.addEventListener('ended', () => {
