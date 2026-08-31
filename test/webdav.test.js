@@ -18,6 +18,8 @@ const XML = `<?xml version="1.0" encoding="utf-8"?>
   </d:response>
 </d:multistatus>`;
 
+const XML_123PAN_ROOT = `<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/webdav/</D:href><D:propstat><D:prop><D:displayname>TV</D:displayname><D:getlastmodified>Mon, 31 Aug 2026 01:16:58 GMT</D:getlastmodified><D:creationdate>Mon, 31 Aug 2026 01:16:58 GMT</D:creationdate><D:supportedlock><D:lockentry xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock><D:resourcetype><D:collection xmlns:D="DAV:"/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>`;
+
 test('relative paths reject traversal', () => {
   assert.throws(() => cleanRelative('../secret.mp4'));
   assert.equal(cleanRelative('/A/B.mp4'), 'A/B.mp4');
@@ -26,9 +28,12 @@ test('relative paths reject traversal', () => {
 test('WebDAV PROPFIND parses folders and video metadata', async (t) => {
   const originalFetch = global.fetch;
   t.after(() => { global.fetch = originalFetch; });
-  global.fetch = async (_url, options) => {
+  global.fetch = async (url, options) => {
     assert.equal(options.method, 'PROPFIND');
     assert.match(options.headers.Authorization, /^Basic /);
+    assert.equal(options.headers.Depth, '1');
+    assert.equal(options.body, undefined);
+    assert.equal(String(url).endsWith('/'), true);
     return new Response(XML, { status: 207, headers: { 'content-type': 'application/xml' } });
   };
 
@@ -45,6 +50,37 @@ test('WebDAV PROPFIND parses folders and video metadata', async (t) => {
   assert.equal(result.items[1].size, 12345);
 });
 
+test('123pan root PROPFIND mirrors the proven curl request and parses TV', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+
+  global.fetch = async (url, options) => {
+    assert.equal(String(url), 'https://webdav.123pan.cn/webdav/');
+    assert.equal(options.method, 'PROPFIND');
+    assert.equal(options.redirect, 'manual');
+    assert.equal(options.headers.Depth, '0');
+    assert.match(options.headers.Authorization, /^Basic /);
+    assert.equal(options.headers['Content-Type'], undefined);
+    assert.equal(options.body, undefined);
+    return new Response(XML_123PAN_ROOT, {
+      status: 207,
+      headers: { 'content-type': 'text/xml; charset=utf-8' },
+    });
+  };
+
+  const client = new WebDavClient({
+    url: 'https://webdav.123pan.cn/webdav',
+    username: 'example-user',
+    password: 'example-app-password',
+    root: '/',
+  });
+
+  const result = await client.test();
+  assert.equal(result.ok, true);
+  assert.equal(result.displayName, 'TV');
+  assert.equal(result.url, 'https://webdav.123pan.cn/webdav/');
+});
+
 test('123pan trusted WebDAV redirect keeps Basic auth and PROPFIND method', async (t) => {
   const originalFetch = global.fetch;
   t.after(() => { global.fetch = originalFetch; });
@@ -59,10 +95,10 @@ test('123pan trusted WebDAV redirect keeps Basic auth and PROPFIND method', asyn
     if (requests.length === 1) {
       return new Response(null, {
         status: 307,
-        headers: { location: 'https://webdav-demo.pd1.123pan.cn/webdav' },
+        headers: { location: 'https://webdav-demo.pd1.123pan.cn/webdav/' },
       });
     }
-    return new Response(XML, { status: 207, headers: { 'content-type': 'application/xml' } });
+    return new Response(XML_123PAN_ROOT, { status: 207, headers: { 'content-type': 'text/xml' } });
   };
 
   const client = new WebDavClient({
@@ -86,7 +122,7 @@ test('WebDAV auth is not forwarded to an unrelated redirect host', async (t) => 
     assert.match(options.headers.Authorization, /^Basic /);
     return new Response(null, {
       status: 307,
-      headers: { location: 'https://evil.example.net/webdav' },
+      headers: { location: 'https://evil.example.net/webdav/' },
     });
   };
 
