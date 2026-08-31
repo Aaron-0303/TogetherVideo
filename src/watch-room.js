@@ -1,6 +1,8 @@
 const fs = require('fs/promises');
 const path = require('path');
 
+const USER_PLAYBACK_RATES = Object.freeze([0.5, 0.75, 1, 1.25, 1.5, 2]);
+
 function cleanText(value, max = 200) {
   return String(value || '').trim().replace(/[<>]/g, '').slice(0, max);
 }
@@ -9,6 +11,11 @@ function cleanMediaPath(value) {
   const raw = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
   if (!raw || raw.split('/').some((part) => part === '..')) return '';
   return path.posix.normalize(`/${raw}`).replace(/^\/+/, '');
+}
+
+function isUserPlaybackRate(value) {
+  const rate = Number(value);
+  return Number.isFinite(rate) && USER_PLAYBACK_RATES.some((allowed) => Math.abs(allowed - rate) < 1e-6);
 }
 
 function defaultState() {
@@ -45,6 +52,10 @@ class WatchRoom {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8'));
       this.state = { ...defaultState(), ...(parsed || {}) };
       if (parsed?.media && parsed.media.path) this.state.media = { path: cleanMediaPath(parsed.media.path), name: cleanText(parsed.media.name) };
+      // Older clients could accidentally publish an internal sync-correction rate
+      // (for example 1.035x) as the room's authoritative user rate. Never restore
+      // such a value after restart: only rates exposed by the UI are authoritative.
+      if (!isUserPlaybackRate(this.state.rate)) this.state.rate = 1;
     } catch (error) {
       if (error.code !== 'ENOENT') console.warn('[room] resetting invalid watch state:', error.message);
     }
@@ -139,7 +150,10 @@ class WatchRoom {
         this.state.reason = 'seek';
       } else if (action === 'rate') {
         const rate = Number(payload.rate);
-        if (!Number.isFinite(rate) || rate < 0.25 || rate > 4) return null;
+        // Internal sync correction rates are intentionally not valid room rates.
+        // This prevents a delayed browser ratechange event from turning 1.01x or
+        // 0.99x into the permanent authoritative playback speed for both viewers.
+        if (!isUserPlaybackRate(rate)) return null;
         this.state.position = effectivePosition(this.state, now);
         this.state.rate = rate;
         if (this.state.playing) this.state.anchorAt = now;
@@ -156,4 +170,4 @@ class WatchRoom {
   }
 }
 
-module.exports = { WatchRoom, effectivePosition, cleanMediaPath };
+module.exports = { WatchRoom, effectivePosition, cleanMediaPath, isUserPlaybackRate, USER_PLAYBACK_RATES };
