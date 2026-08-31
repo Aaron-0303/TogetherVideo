@@ -100,6 +100,15 @@
       const sinceBuffer = this.lastBufferEndAt ? now - this.lastBufferEndAt : Number.POSITIVE_INFINITY;
       const sinceHardSeek = this.lastHardSeekAt ? now - this.lastHardSeekAt : Number.POSITIVE_INFINITY;
 
+      // A buffering decoder should never be forced to seek merely because the
+      // shared timeline was paused. Let it fill its buffer first; when it reports
+      // ready it can align once while the room is still paused.
+      if (buffering && !force && reason !== 'seek') {
+        this.resetDrift();
+        this.correctionActive = false;
+        return { action: 'hold', rate, absDrift: abs, stableSamples: 0 };
+      }
+
       if (force || reason === 'seek' || (!playing && abs > 0.2)) {
         this.resetDrift();
         this.correctionActive = false;
@@ -110,12 +119,6 @@
         this.resetDrift();
         this.correctionActive = false;
         return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
-      }
-
-      if (buffering) {
-        this.resetDrift();
-        this.correctionActive = false;
-        return { action: 'hold', rate, absDrift: abs, stableSamples: 0 };
       }
 
       if (!sampled) {
