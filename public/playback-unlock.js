@@ -1,6 +1,6 @@
 (() => {
   const player = window.TogetherMediaPlayer;
-  const video = player?.video || document.getElementById('video');
+  const video = document.getElementById('video');
   const overlay = document.getElementById('resumeOverlay');
   if (!player || !video || !overlay || player.__togetherUnlockPatched) return;
 
@@ -18,9 +18,6 @@
     overlay.classList.remove('hidden');
   }
 
-  // A late viewer may not have interacted with the page yet. Keep the native
-  // Artplayer video decoding/range pipeline alive by retrying muted, then let one
-  // explicit tap unlock sound inside the browser's user-gesture boundary.
   player.play = async (...args) => {
     try {
       return await originalPlay(...args);
@@ -37,7 +34,6 @@
         video.defaultMuted = false;
         throw mutedError;
       }
-
       throw error;
     }
   };
