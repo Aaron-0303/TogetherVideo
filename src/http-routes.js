@@ -4,6 +4,7 @@ const { cleanName } = require('./identity');
 
 const MEDIA_BRIDGE_WORKER = `
 const SOURCE_TTL_MS = 90000;
+const RANGE_CHUNK_BYTES = 16 * 1024 * 1024;
 const sourceCache = new Map();
 
 self.addEventListener('install', function () { self.skipWaiting(); });
@@ -18,6 +19,24 @@ function mimeForPath(mediaPath) {
   if (clean.endsWith('.ogv') || clean.endsWith('.ogg')) return 'video/ogg';
   if (clean.endsWith('.mkv')) return 'video/x-matroska';
   return 'application/octet-stream';
+}
+
+function boundedMediaRange(rawRange) {
+  const raw = String(rawRange || '').trim();
+  if (!raw) return 'bytes=0-' + String(RANGE_CHUNK_BYTES - 1);
+
+  const match = /^bytes=(\\d+)-(\\d*)$/i.exec(raw);
+  if (!match) return raw;
+
+  const start = Number(match[1]);
+  const requestedEnd = match[2] ? Number(match[2]) : NaN;
+  if (!Number.isSafeInteger(start) || start < 0) return raw;
+
+  const maxEnd = start + RANGE_CHUNK_BYTES - 1;
+  if (Number.isSafeInteger(requestedEnd) && requestedEnd >= start) {
+    return 'bytes=' + String(start) + '-' + String(Math.min(requestedEnd, maxEnd));
+  }
+  return 'bytes=' + String(start) + '-' + String(maxEnd);
 }
 
 async function resolveProviderUrl(mediaPath, fresh) {
@@ -47,8 +66,13 @@ async function resolveProviderUrl(mediaPath, fresh) {
 
 function providerHeaders(request) {
   const headers = new Headers();
-  const range = request.headers.get('range');
-  if (range) headers.set('Range', range);
+  // Some browsers start media loading with no Range header, while others use
+  // an open-ended bytes=N- request. Passing either form straight to 123 can
+  // produce a 200 response for the entire multi-gigabyte object. That regressed
+  // metadata discovery for MP4 files whose moov atom is not at the beginning.
+  // Keep the browser's requested start offset, but cap each provider fetch to a
+  // 16 MiB window. This is the known-good 3.1.2 transport behavior.
+  headers.set('Range', boundedMediaRange(request.headers.get('range')));
   const ifRange = request.headers.get('if-range');
   if (ifRange) headers.set('If-Range', ifRange);
   return headers;
@@ -165,9 +189,10 @@ function registerHttpRoutes(options = {}) {
 
   app.get('/healthz', (_req, res) => res.json({ ok: true, version: appVersion }));
 
-  // 3.2.1 browser-local media compatibility layer. It does not proxy video
-  // through Node: the Service Worker itself fetches the provider CDN, forwards
-  // the browser's exact Range request, and only normalizes MIME/attachment headers.
+  // Browser-local media compatibility layer. Node only serves the worker and
+  // resolves the signed provider URL; video bytes still flow provider -> browser.
+  // The worker restores bounded Range windows because several provider/browser
+  // combinations otherwise fall back to an unusable whole-file HTTP 200 stream.
   app.get('/sw.js', (_req, res) => {
     res.type('application/javascript');
     res.set('Cache-Control', 'no-store');
