@@ -14,6 +14,8 @@ const { WatchRoom, cleanMediaPath } = require('./src/watch-room');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.webm', '.mov', '.ogv', '.ogg', '.mkv']);
 const PLAYABLE_CACHE_TTL_MS = 10_000;
+const BUFFERING_PAUSE_DELAY_MS = 1500;
+const BUFFERING_RESUME_DELAY_MS = 800;
 
 function cleanName(value) {
   return String(value || '访客').trim().replace(/[<>]/g, '').slice(0, 20) || '访客';
@@ -51,6 +53,9 @@ async function main() {
 
   const participants = new Map();
   const playableCache = new Map();
+  let bufferingPauseTimer = null;
+  let bufferingResumeTimer = null;
+  let bufferingHold = null;
 
   function participantList() {
     return [...participants.entries()].map(([id, item]) => ({
@@ -62,6 +67,72 @@ async function main() {
 
   function broadcastPresence() {
     io.emit('presence:update', { participants: participantList(), limit: 2 });
+  }
+
+  function hasBufferingParticipant() {
+    if (participants.size < 2) return false;
+    return [...participants.values()].some((item) => [...item.buffering.values()].some(Boolean));
+  }
+
+  function clearPauseTimer() {
+    clearTimeout(bufferingPauseTimer);
+    bufferingPauseTimer = null;
+  }
+
+  function clearResumeTimer() {
+    clearTimeout(bufferingResumeTimer);
+    bufferingResumeTimer = null;
+  }
+
+  function coordinateBuffering() {
+    const current = room.snapshot();
+    if (bufferingHold && current.revision !== bufferingHold.revision) bufferingHold = null;
+
+    if (hasBufferingParticipant()) {
+      clearResumeTimer();
+      if (bufferingHold || bufferingPauseTimer || !current.media || !current.playing) return;
+
+      bufferingPauseTimer = setTimeout(() => {
+        bufferingPauseTimer = null;
+        if (!hasBufferingParticipant()) return;
+        const before = room.snapshot();
+        if (!before.media || !before.playing) return;
+
+        const paused = room.apply('wait', {}, '缓冲保护');
+        if (!paused) return;
+        bufferingHold = { revision: paused.revision, mediaVersion: paused.mediaVersion };
+        io.emit('room:state', paused);
+        io.emit('room:buffering-hold', { message: '对方持续缓冲，已暂时一起暂停' });
+      }, BUFFERING_PAUSE_DELAY_MS);
+      return;
+    }
+
+    clearPauseTimer();
+    if (!bufferingHold || bufferingResumeTimer) return;
+
+    bufferingResumeTimer = setTimeout(() => {
+      bufferingResumeTimer = null;
+      if (hasBufferingParticipant() || !bufferingHold) return;
+
+      const hold = bufferingHold;
+      const before = room.snapshot();
+      bufferingHold = null;
+      if (
+        !before.media
+        || before.playing
+        || before.mediaVersion !== hold.mediaVersion
+        || before.revision !== hold.revision
+      ) return;
+
+      const resumed = room.apply('play', {
+        mediaPath: before.media.path,
+        mediaVersion: before.mediaVersion,
+        position: before.position,
+      }, '缓冲恢复');
+      if (!resumed) return;
+      io.emit('room:state', resumed);
+      io.emit('room:buffering-resume', { message: '双方已就绪，继续播放' });
+    }, BUFFERING_RESUME_DELAY_MS);
   }
 
   function requireAuth(req, res, next) {
@@ -148,6 +219,9 @@ async function main() {
       await settings.setWebDav(req.body || {});
       playableCache.clear();
       const snapshot = room.apply('clear', {}, req.session.nickname || '设置');
+      bufferingHold = null;
+      clearPauseTimer();
+      clearResumeTimer();
       if (snapshot) io.emit('room:state', snapshot);
       res.json({ ok: true, settings: settings.publicSettings() });
     } catch (error) { next(error); }
@@ -225,6 +299,7 @@ async function main() {
 
     socket.emit('room:snapshot', room.snapshot());
     broadcastPresence();
+    coordinateBuffering();
 
     socket.on('sync:request', (ack = () => {}) => {
       if (typeof ack === 'function') ack(room.snapshot());
@@ -235,11 +310,15 @@ async function main() {
       if (!current) return;
       current.buffering.set(socket.id, Boolean(payload.buffering));
       broadcastPresence();
+      coordinateBuffering();
     });
 
     const apply = (action, payload = {}) => {
       const snapshot = room.apply(action, payload, nickname);
-      if (snapshot) io.emit('room:state', snapshot);
+      if (snapshot) {
+        io.emit('room:state', snapshot);
+        coordinateBuffering();
+      }
     };
 
     socket.on('media:select', (payload = {}) => {
@@ -256,6 +335,7 @@ async function main() {
       if (snapshot) {
         io.emit('room:state', snapshot);
         io.emit('room:wait', { nickname });
+        coordinateBuffering();
       }
     });
 
@@ -266,6 +346,7 @@ async function main() {
       current.buffering.delete(socket.id);
       if (!current.sockets.size) participants.delete(participantId);
       broadcastPresence();
+      coordinateBuffering();
     });
   });
 
@@ -301,6 +382,7 @@ async function main() {
     console.log('[TogetherVideo 2.0] fixed two-person room; no room codes');
     console.log('[TogetherVideo 2.0] WebDAV is used only for metadata and direct-link discovery');
     console.log('[TogetherVideo 2.0] media bytes are never proxied by this server');
+    console.log('[TogetherVideo 2.0] sync uses conservative drift correction and shared buffering protection');
   });
 }
 

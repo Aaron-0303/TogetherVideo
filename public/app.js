@@ -9,14 +9,16 @@ const ui = {
   settingsModal: $('settingsModal'), closeSettingsBtn: $('closeSettingsBtn'), webdavUrl: $('webdavUrl'), webdavUsername: $('webdavUsername'), webdavPassword: $('webdavPassword'), webdavRoot: $('webdavRoot'), testWebdavBtn: $('testWebdavBtn'), saveWebdavBtn: $('saveWebdavBtn'), newSitePassword: $('newSitePassword'), saveSitePasswordBtn: $('saveSitePasswordBtn'), settingsNotice: $('settingsNotice'), toast: $('toast'),
 };
 
+const syncReconciler = new SyncPolicy.Reconciler();
+
 const state = {
   nickname: '', participantId: '', socket: null, settings: null,
   libraryPath: '', librarySeq: 0,
   mediaPath: '', mediaVersion: 0, sourceLoading: false, mediaReady: false, loadSeq: 0,
   lastSnapshot: null, lastRevision: -1, halfRttMs: 0,
-  buffering: false, bufferTimer: null, lastBufferEndAt: 0,
+  buffering: false, bufferTimer: null,
   expectedPlayUntil: 0, expectedPauseUntil: 0, expectedSeek: null, expectedRate: null,
-  correctionTimer: null, correctionToken: 0, lastHardSeekAt: 0, syncTimer: null, lastPeerName: '',
+  syncTimer: null, syncSeq: 0, lastSyncSeq: 0, lastPeerName: '',
   seeking: false,
 };
 
@@ -144,24 +146,28 @@ function connectSocket() {
     setNotice(`WebSocket：${error.message}`, true);
   });
   socket.on('room:full', (payload) => setNotice(payload?.message || '当前已有两个人在线', true));
-  socket.on('room:snapshot', (snapshot) => applySnapshot(snapshot, true));
-  socket.on('room:state', (snapshot) => applySnapshot(snapshot, false));
+  socket.on('room:snapshot', (snapshot) => applySnapshot(snapshot, true, false));
+  socket.on('room:state', (snapshot) => applySnapshot(snapshot, false, false));
   socket.on('presence:update', renderPresence);
   socket.on('room:wait', (payload) => toast(`${payload?.nickname || '对方'}：等等我`));
+  socket.on('room:buffering-hold', (payload) => toast(payload?.message || '对方持续缓冲，已暂时一起暂停'));
+  socket.on('room:buffering-resume', (payload) => toast(payload?.message || '双方已就绪，继续播放'));
 
   clearInterval(state.syncTimer);
-  state.syncTimer = setInterval(() => requestSync(false), 4000);
+  state.syncTimer = setInterval(() => requestSync(false), 1000);
 }
 
 function requestSync(force = false) {
   const socket = state.socket;
   if (!socket?.connected) return;
+  const seq = ++state.syncSeq;
   const started = performance.now();
   socket.timeout(2500).emit('sync:request', (error, snapshot) => {
-    if (error || !snapshot) return;
+    if (error || !snapshot || seq < state.lastSyncSeq) return;
+    state.lastSyncSeq = seq;
     const rtt = performance.now() - started;
-    state.halfRttMs = Math.min(1000, Math.max(0, rtt / 2));
-    applySnapshot(snapshot, force);
+    state.halfRttMs = syncReconciler.sampleRtt(rtt);
+    applySnapshot(snapshot, force, true);
   });
 }
 
@@ -244,35 +250,40 @@ ui.libraryToggle.addEventListener('click', () => ui.libraryPanel.classList.add('
 ui.closeLibraryBtn.addEventListener('click', () => ui.libraryPanel.classList.remove('open'));
 
 function clearCorrection(restore = true) {
-  clearTimeout(state.correctionTimer);
-  state.correctionTimer = null;
-  state.correctionToken++;
+  syncReconciler.correctionActive = false;
+  syncReconciler.resetDrift();
   if (restore && state.lastSnapshot && state.mediaReady) setProgrammaticRate(Number(state.lastSnapshot.rate || 1));
 }
 
 function setProgrammaticRate(rate) {
   const value = Math.min(4, Math.max(0.25, Number(rate || 1)));
   if (Math.abs(ui.video.playbackRate - value) < 0.001) return;
-  state.expectedRate = { value, until: Date.now() + 1200 };
+  state.expectedRate = { value, until: Date.now() + 1500 };
   ui.video.playbackRate = value;
   ui.rateSelect.value = String(Number(state.lastSnapshot?.rate || value));
 }
 
 function setProgrammaticSeek(target) {
   if (!Number.isFinite(target)) return;
-  state.expectedSeek = { target, until: Date.now() + 1500 };
-  try { ui.video.currentTime = Math.max(0, target); state.lastHardSeekAt = Date.now(); } catch {}
+  const duration = Number(ui.video.duration);
+  const upper = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.05) : Number.POSITIVE_INFINITY;
+  const value = Math.min(upper, Math.max(0, target));
+  state.expectedSeek = { target: value, until: Date.now() + 2200 };
+  try {
+    ui.video.currentTime = value;
+    syncReconciler.noteHardSeek();
+  } catch {}
 }
 
 function setProgrammaticPause() {
   if (ui.video.paused) return;
-  state.expectedPauseUntil = Date.now() + 1200;
+  state.expectedPauseUntil = Date.now() + 1500;
   ui.video.pause();
 }
 
 function setProgrammaticPlay() {
   if (!ui.video.paused) return;
-  state.expectedPlayUntil = Date.now() + 1500;
+  state.expectedPlayUntil = Date.now() + 1800;
   ui.video.play()
     .then(() => ui.resumeOverlay.classList.add('hidden'))
     .catch(() => {
@@ -287,7 +298,7 @@ function targetPosition(snapshot) {
   return base + state.halfRttMs / 1000 * Number(snapshot.rate || 1);
 }
 
-function applySnapshot(snapshot, force = false) {
+function applySnapshot(snapshot, force = false, sampled = false) {
   if (!snapshot || typeof snapshot !== 'object') return;
   const revision = Number(snapshot.revision || 0);
   if (revision < state.lastRevision) return;
@@ -303,8 +314,11 @@ function applySnapshot(snapshot, force = false) {
     loadMedia(snapshot);
     return;
   }
-  if (state.sourceLoading || !state.mediaReady) return;
-  applyPlayback(snapshot, force);
+  if (state.sourceLoading || !state.mediaReady) {
+    if (snapshot.playing) setBuffering(true);
+    return;
+  }
+  applyPlayback(snapshot, force, sampled);
 }
 
 function loadMedia(snapshot) {
@@ -334,6 +348,7 @@ function loadMedia(snapshot) {
     state.sourceLoading = false;
     state.mediaReady = true;
     setNotice('');
+    if (ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
     requestSync(true);
     refreshActiveLibraryItem();
   };
@@ -359,43 +374,40 @@ function clearMedia() {
   setNotice('');
 }
 
-function applyPlayback(snapshot, force = false) {
+function applyPlayback(snapshot, force = false, sampled = false) {
   if (!state.mediaReady || snapshot.media?.path !== state.mediaPath || Number(snapshot.mediaVersion) !== state.mediaVersion) return;
   const desiredRate = Number(snapshot.rate || 1);
   const target = targetPosition(snapshot);
   const current = Number(ui.video.currentTime || 0);
   const drift = current - target;
   const absDrift = Math.abs(drift);
-  const explicitSeek = snapshot.reason === 'seek';
-  const pausedAlignment = !snapshot.playing && absDrift > 0.15;
-  const sinceBuffer = Date.now() - state.lastBufferEndAt;
+  const decision = syncReconciler.decide({
+    drift,
+    desiredRate,
+    playing: snapshot.playing,
+    buffering: state.buffering,
+    sampled,
+    force,
+    reason: snapshot.reason,
+  });
 
-  if (force || explicitSeek || pausedAlignment) {
-    clearCorrection(false);
+  if (decision.action === 'seek') {
     setProgrammaticRate(desiredRate);
-    if (absDrift > 0.12) setProgrammaticSeek(target);
-  } else if (!state.buffering && sinceBuffer > 3000 && absDrift > 1.8 && Date.now() - state.lastHardSeekAt > 6000) {
-    clearCorrection(false);
-    setProgrammaticRate(desiredRate);
-    setProgrammaticSeek(target);
-  } else if (!state.buffering && sinceBuffer > 1200 && snapshot.playing && absDrift > 0.35) {
-    const adjust = Math.min(0.06, Math.max(0.02, absDrift * 0.03));
-    const corrected = drift < 0 ? desiredRate + adjust : desiredRate - adjust;
-    const token = ++state.correctionToken;
-    setProgrammaticRate(corrected);
-    clearTimeout(state.correctionTimer);
-    state.correctionTimer = setTimeout(() => {
-      if (token !== state.correctionToken) return;
-      state.correctionTimer = null;
-      setProgrammaticRate(Number(state.lastSnapshot?.rate || desiredRate));
-    }, 1800);
-  } else if (!state.correctionTimer) {
+    if (absDrift > 0.2) setProgrammaticSeek(target);
+  } else if (decision.action === 'rate') {
+    setProgrammaticRate(decision.rate);
+  } else if (decision.action === 'normal' || decision.action === 'hold') {
     setProgrammaticRate(desiredRate);
   }
 
   ui.rateSelect.value = String(desiredRate);
-  ui.syncBadge.textContent = absDrift <= 0.25 ? '已对轴' : state.buffering ? `缓冲中 · 差 ${absDrift.toFixed(1)}s` : `校准 ${absDrift.toFixed(1)}s`;
-  ui.syncBadge.classList.toggle('good', absDrift <= 0.25 && !state.buffering);
+  if (state.buffering) ui.syncBadge.textContent = `缓冲中 · 差 ${absDrift.toFixed(1)}s`;
+  else if (absDrift <= 0.4) ui.syncBadge.textContent = '已对轴';
+  else if (absDrift < 1.2) ui.syncBadge.textContent = `同步稳定 · 差 ${absDrift.toFixed(1)}s`;
+  else if (decision.action === 'rate' || decision.action === 'preserve') ui.syncBadge.textContent = `平滑校准 · 差 ${absDrift.toFixed(1)}s`;
+  else if (decision.action === 'seek') ui.syncBadge.textContent = '已重新对轴';
+  else ui.syncBadge.textContent = `观察偏差 · ${absDrift.toFixed(1)}s`;
+  ui.syncBadge.classList.toggle('good', absDrift <= 0.6 && !state.buffering);
 
   if (snapshot.playing) setProgrammaticPlay();
   else setProgrammaticPause();
@@ -447,8 +459,7 @@ ui.video.addEventListener('ratechange', () => {
     return;
   }
   state.expectedRate = null;
-  clearTimeout(state.correctionTimer);
-  state.correctionTimer = null;
+  clearCorrection(false);
   emitControl('player:rate', mediaPayload({ rate: ui.video.playbackRate }));
 });
 
@@ -459,21 +470,18 @@ ui.video.addEventListener('ended', () => {
 function setBuffering(value) {
   const next = Boolean(value);
   if (state.buffering === next) return;
-  const wasBuffering = state.buffering;
   state.buffering = next;
-  if (wasBuffering && !next) state.lastBufferEndAt = Date.now();
+  syncReconciler.setBuffering(next);
+  if (next) clearCorrection(true);
   ui.selfBuffering.textContent = next ? '正在缓冲' : '播放就绪';
   if (state.socket?.connected) state.socket.emit('presence:buffering', { buffering: next });
   if (!next) requestSync(false);
 }
 
 function beginBuffering() {
-  if (ui.video.paused || state.sourceLoading || !state.mediaPath) return;
+  if (ui.video.paused || !state.mediaPath) return;
   clearTimeout(state.bufferTimer);
-  state.bufferTimer = setTimeout(() => {
-    setBuffering(true);
-    clearCorrection(true);
-  }, 300);
+  state.bufferTimer = setTimeout(() => setBuffering(true), 500);
 }
 
 function endBuffering() {
@@ -485,6 +493,10 @@ ui.video.addEventListener('waiting', beginBuffering);
 ui.video.addEventListener('stalled', beginBuffering);
 ui.video.addEventListener('playing', endBuffering);
 ui.video.addEventListener('canplay', endBuffering);
+ui.video.addEventListener('loadeddata', endBuffering);
+ui.video.addEventListener('progress', () => {
+  if (state.buffering && ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
+});
 ui.video.addEventListener('error', () => {
   if (!state.mediaPath) return;
   state.sourceLoading = false;
@@ -500,7 +512,7 @@ ui.video.addEventListener('error', () => {
 });
 
 ui.resumeOverlay.addEventListener('click', () => {
-  state.expectedPlayUntil = Date.now() + 1500;
+  state.expectedPlayUntil = Date.now() + 1800;
   ui.video.play().then(() => ui.resumeOverlay.classList.add('hidden')).catch(() => {});
 });
 
