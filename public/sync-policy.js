@@ -149,7 +149,8 @@
       }
 
       // Hysteresis: once correction starts, continue until the tighter settled
-      // threshold is reached. This prevents a stable ~0.5-1.5 s residual gap.
+      // threshold is reached. Large errors continue accumulating so a persistent
+      // >3 s mismatch can still escalate to one hard seek after 3 confirmations.
       if (this.correctionActive) {
         if (abs <= this.options.settledDrift || (this.correctionSign && sign !== this.correctionSign)) {
           this.stopCorrection();
@@ -159,12 +160,26 @@
           this.stopCorrection();
           return { action: 'observe', rate, absDrift: abs, stableSamples: 0 };
         }
+
+        let stableSamples = this.driftSamples.length;
+        if (abs >= this.options.hardDrift) {
+          stableSamples = this.sampleDrift(value);
+          if (
+            stableSamples >= this.options.hardStableSamples
+            && sinceBuffer >= this.options.afterBufferHardDelayMs
+            && sinceHardSeek >= this.options.hardSeekCooldownMs
+          ) {
+            this.noteHardSeek(now);
+            return { action: 'seek', rate, absDrift: abs, stableSamples };
+          }
+        }
+
         return {
           action: 'rate',
           rate: this.correctionRate(value, rate),
           baseRate: rate,
           absDrift: abs,
-          stableSamples: this.driftSamples.length,
+          stableSamples,
         };
       }
 
