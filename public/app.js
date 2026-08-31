@@ -330,10 +330,10 @@ function applySnapshot(snapshot, force = false, sampled = false) {
     loadMedia(snapshot);
     return;
   }
-  if (state.sourceLoading || !state.mediaReady) {
-    if (snapshot.playing) setBuffering(true);
-    return;
-  }
+  // Loading/demuxing is preparation, not playback starvation. Reporting it as
+  // shared buffering can make the server pause the room before libmedia has had
+  // a chance to render its first frame, creating a pause/wait deadlock.
+  if (state.sourceLoading || !state.mediaReady) return;
   applyPlayback(snapshot, force, sampled);
 }
 
@@ -344,7 +344,7 @@ function loadMedia(snapshot) {
   state.sourceLoading = true;
   state.mediaReady = false;
   clearCorrection(false);
-  setBuffering(Boolean(snapshot.playing));
+  setBuffering(false);
   ui.mediaTitle.textContent = snapshot.media.name || snapshot.media.path.split('/').pop();
   ui.emptyPlayer.classList.add('hidden');
   ui.resumeOverlay.classList.add('hidden');
@@ -363,7 +363,7 @@ function loadMedia(snapshot) {
     state.sourceLoading = false;
     state.mediaReady = true;
     if (player.mode === 'libmedia') {
-      setNotice('已自动启用 HEVC 兼容播放器；视频仍直接从 123 获取，不经过本服务器。');
+      setNotice('HEVC 兼容播放器已解析媒体，正在准备首帧；视频仍直接从 123 获取。');
     } else {
       setNotice('');
     }
@@ -445,15 +445,18 @@ player.addEventListener('fallbackstart', () => {
   ui.syncBadge.textContent = '切换 HEVC 兼容模式';
   ui.syncBadge.classList.remove('good');
   setNotice('原生播放器无法解码，正在启动 HEVC 兼容播放器…');
-  setBuffering(true);
 });
 
 player.addEventListener('fallbackready', () => {
   if (!state.mediaPath) return;
   ui.syncBadge.textContent = 'HEVC 兼容模式';
   ui.syncBadge.classList.remove('good');
-  setNotice('HEVC 兼容播放器已就绪；视频仍直接从 123 获取。');
-  requestSync(true);
+  setNotice('HEVC 兼容播放器已完成解析，等待首帧。');
+});
+
+player.addEventListener('firstrender', () => {
+  if (!state.mediaPath || player.mode !== 'libmedia') return;
+  setNotice('HEVC 兼容播放器已开始渲染；视频仍直接从 123 获取。');
 });
 
 player.addEventListener('play', () => {
