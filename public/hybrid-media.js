@@ -15,11 +15,7 @@
 
   function fallbackSource(source) {
     const url = new URL(source, location.href);
-    if (url.origin === location.origin && url.pathname === '/api/media') {
-      // The Service Worker owns /api/media for native <video>. AVPlayer must see
-      // the original 307 so its FetchIOLoader can follow the provider URL itself.
-      url.searchParams.set('_swresolve', '1');
-    }
+    if (url.origin === location.origin && url.pathname === '/api/media') url.searchParams.set('_swresolve', '1');
     return url.toString();
   }
 
@@ -50,6 +46,7 @@
       this.events = new EventTarget();
       this.mode = 'native';
       this.source = '';
+      this.nativeFirstFrame = false;
       this.avPlayer = null;
       this.avModule = null;
       this.avLoaded = false;
@@ -76,27 +73,31 @@
     }
 
     _emit(type, detail) {
-      this.events.dispatchEvent(detail === undefined
-        ? new Event(type)
-        : new CustomEvent(type, { detail }));
+      this.events.dispatchEvent(detail === undefined ? new Event(type) : new CustomEvent(type, { detail }));
     }
 
-    _requestInteraction(detail = {}) {
-      if (this.resumeOverlay) {
-        this.resumeOverlay.textContent = '点击开启声音并继续 HEVC 播放';
-        this.resumeOverlay.classList.remove('hidden');
-      }
-      this._emit('interactionrequired', detail);
+    _markNativeFirstFrame() {
+      if (this.nativeFirstFrame) return;
+      this.nativeFirstFrame = true;
+      this._emit('firstrender', { mode: 'native' });
     }
 
-    _markFirstFrame() {
+    _markAVFirstFrame() {
       if (this.avFirstFrame) return;
       this.avFirstFrame = true;
       this.avStalled = false;
       this.avResizeHandler?.();
       this._emit('loadeddata');
-      this._emit('firstrender');
+      this._emit('firstrender', { mode: 'libmedia' });
       this._emit('canplay');
+    }
+
+    _requestInteraction(detail = {}) {
+      if (this.resumeOverlay) {
+        this.resumeOverlay.textContent = '点击继续兼容播放';
+        this.resumeOverlay.classList.remove('hidden');
+      }
+      this._emit('interactionrequired', detail);
     }
 
     _bindNative() {
@@ -109,6 +110,7 @@
       for (const type of passthrough) {
         this.video.addEventListener(type, () => {
           if (this.mode !== 'native' || this.suppressNative) return;
+          if (type === 'loadeddata' || type === 'playing') this._markNativeFirstFrame();
           this._updateControls();
           this._emit(type);
         });
@@ -117,6 +119,20 @@
       this.video.addEventListener('error', () => {
         if (this.mode !== 'native' || this.suppressNative || !this.source) return;
         const nativeError = this.video.error;
+
+        // v3 stability rule: WebKit/iPad/iPhone stay on the native media pipeline.
+        // The libmedia canvas/audio fallback was reproducibly black and silent on
+        // Safari, so entering it only hides the real compatibility error.
+        if (isAppleMobile()) {
+          this._emit('fallbackunavailable', {
+            platform: 'apple-mobile',
+            nativeErrorCode: nativeError?.code || 4,
+            reason: 'Safari 使用系统原生媒体管线；已禁用不稳定的 libmedia fallback',
+          });
+          this._emit('error');
+          return;
+        }
+
         this._startFallback(nativeError).catch((error) => {
           this.avError = { code: nativeError?.code || 4, message: error?.message || String(error) };
           this._emit('fallbackfailed', { error });
@@ -128,18 +144,10 @@
     _bindControls() {
       const controls = this.controls;
       if (!controls) return;
-
       controls.play?.addEventListener('click', () => {
-        if (this.paused) {
-          this.play().catch((error) => {
-            this.avError = { code: 4, message: error?.message || String(error) };
-            this._requestInteraction({ error });
-          });
-        } else {
-          this.pause();
-        }
+        if (this.paused) this.play().catch((error) => this._requestInteraction({ error }));
+        else this.pause();
       });
-
       controls.seek?.addEventListener('input', () => {
         if (!Number.isFinite(this.duration) || this.duration <= 0) return;
         const preview = Number(controls.seek.value || 0) / 1000 * this.duration;
@@ -149,11 +157,7 @@
         if (!Number.isFinite(this.duration) || this.duration <= 0) return;
         this.currentTime = Number(controls.seek.value || 0) / 1000 * this.duration;
       });
-
-      controls.volume?.addEventListener('input', () => {
-        this.volume = Number(controls.volume.value || 0);
-      });
-
+      controls.volume?.addEventListener('input', () => { this.volume = Number(controls.volume.value || 0); });
       controls.fullscreen?.addEventListener('click', () => {
         if (document.fullscreenElement) document.exitFullscreen?.();
         else this.shell?.requestFullscreen?.();
@@ -175,9 +179,7 @@
       if (controls.play) controls.play.textContent = this.paused ? '▶ 播放' : '❚❚ 暂停';
       if (controls.time) controls.time.textContent = `${formatTime(this.currentTime)} / ${formatTime(this.duration)}`;
       if (controls.seek && Number.isFinite(this.duration) && this.duration > 0) {
-        if (document.activeElement !== controls.seek) {
-          controls.seek.value = String(Math.max(0, Math.min(1000, this.currentTime / this.duration * 1000)));
-        }
+        if (document.activeElement !== controls.seek) controls.seek.value = String(Math.max(0, Math.min(1000, this.currentTime / this.duration * 1000)));
         controls.seek.disabled = false;
       } else if (controls.seek) {
         controls.seek.value = '0';
@@ -207,7 +209,6 @@
     _startAVResize(player, token) {
       this._stopAVResize();
       if (!this.container || !player?.resize) return;
-
       const resize = () => {
         if (this.avPlayer !== player || token !== this.loadToken || this.mode !== 'libmedia') return;
         const rect = this.container.getBoundingClientRect();
@@ -215,7 +216,6 @@
         const height = Math.max(1, Math.round(rect.height || this.container.clientHeight || 1));
         try { player.resize(width, height); } catch {}
       };
-
       this.avResizeHandler = resize;
       if (typeof ResizeObserver !== 'undefined') {
         this.avResizeObserver = new ResizeObserver(() => requestAnimationFrame(resize));
@@ -244,10 +244,6 @@
 
     _wireAVPlayer(player, Events, token) {
       const active = () => this.avPlayer === player && token === this.loadToken;
-
-      // libmedia LOADING/PROGRESS are pipeline-stage events, not HTML media
-      // starvation signals. Mapping them to waiting/progress made TogetherVideo's
-      // shared buffering guard oscillate on iPad.
       player.on(Events.LOADED, () => {
         if (!active()) return;
         this.avLoaded = true;
@@ -255,14 +251,9 @@
         this.avEnded = false;
         this._updateControls();
         this.avResizeHandler?.();
-        // Parsing/demux metadata is complete, but there may still be no rendered
-        // frame. Keep readyState at HAVE_METADATA until first video output.
         this._emit('loadedmetadata');
       });
-      player.on(Events.FIRST_VIDEO_RENDERED, () => {
-        if (!active()) return;
-        this._markFirstFrame();
-      });
+      player.on(Events.FIRST_VIDEO_RENDERED, () => { if (active()) this._markAVFirstFrame(); });
       player.on(Events.PLAYING, () => {
         if (!active()) return;
         this.avPaused = false;
@@ -299,23 +290,15 @@
         this.avCurrentTime = next;
         this._updateControls();
         this._emit('timeupdate');
-        // MSE playback may not emit FIRST_VIDEO_RENDERED through the canvas path;
-        // a progressing media clock proves the native MSE element is rendering.
-        if (!this.avFirstFrame && progressed) this._markFirstFrame();
+        if (!this.avFirstFrame && progressed) this._markAVFirstFrame();
         if (this.avStalled && progressed && !this.avSeeking) {
           this.avStalled = false;
           this._emit('canplay');
         }
       });
-      player.on(Events.RESUME, () => {
-        if (!active()) return;
-        this._requestInteraction({ reason: 'media-resume' });
-      });
+      player.on(Events.RESUME, () => { if (active()) this._requestInteraction({ reason: 'media-resume' }); });
       player.on(Events.TIMEOUT, () => {
-        if (!active()) return;
-        // Initial decoder preparation must not trigger the shared room pause;
-        // only starvation after a real rendered frame counts as buffering.
-        if (!this.avFirstFrame) return;
+        if (!active() || !this.avFirstFrame) return;
         this.avStalled = true;
         this._emit('waiting');
         this._emit('stalled');
@@ -337,25 +320,20 @@
     }
 
     async _startFallback(nativeError) {
+      if (isAppleMobile()) throw new Error('Safari 已禁用 libmedia fallback');
       if (this.switching || this.mode === 'libmedia' || !this.source) return;
       this.switching = true;
       const token = ++this.loadToken;
       const source = this.source;
       const previousRate = Number(this.video?.playbackRate || this.avRate || 1);
       const previousVolume = Number(this.video?.volume ?? this.avVolume ?? 1);
-
       try {
-        this._emit('fallbackstart', {
-          nativeErrorCode: nativeError?.code || 0,
-          reason: nativeError?.message || 'native-media-error',
-        });
-
+        this._emit('fallbackstart', { nativeErrorCode: nativeError?.code || 0, reason: nativeError?.message || 'native-media-error' });
         this.suppressNative = true;
         try { this.video?.pause(); } catch {}
         this.video?.removeAttribute('src');
         this.video?.load();
         this.suppressNative = false;
-
         await this._destroyAVPlayer();
         const { default: AVPlayer, Events } = await this._loadAVModule();
         if (token !== this.loadToken) return;
@@ -379,31 +357,17 @@
           wasmBaseUrl: WASM_BASE_URL,
           enableHardware: true,
           enableWebCodecs: true,
-          // WebGL is substantially more mature on iPadOS; keep WebGPU for other
-          // platforms while avoiding an extra rendering variable on Apple mobile.
-          enableWebGPU: !isAppleMobile(),
+          enableWebGPU: true,
           enableWorker: true,
           enableAudioWorklet: true,
-          // Prefer Safari's mature MSE/system decoder on iPad whenever the
-          // codec is actually MSE-supported. libmedia performs isTypeSupported
-          // checks before calling this hook, so unsupported codecs still fall
-          // back to WebCodecs/WASM.
-          checkUseMSE: () => isAppleMobile(),
-          // libmedia defaults to 4s. 30s caused very long initial/refill waits
-          // and excessive memory pressure for 4K HEVC on iPad.
           preLoadTime: 4,
           loop: false,
         });
         this.avPlayer = player;
         this._wireAVPlayer(player, Events, token);
         this._startAVResize(player, token);
-
-        await player.load(fallbackSource(source), {
-          ext: mediaExtension(source),
-          http: { credentials: 'same-origin' },
-        });
+        await player.load(fallbackSource(source), { ext: mediaExtension(source), http: { credentials: 'same-origin' } });
         if (token !== this.loadToken || this.avPlayer !== player) return;
-
         this.avDuration = Number(player.getDuration?.() || 0n) / 1000;
         player.setVolume(this.avVolume);
         player.setPlaybackRate(Math.min(2, Math.max(0.5, this.avRate)));
@@ -420,7 +384,7 @@
       if (this.mode !== 'libmedia' || !this.avPlayer?.isSuspended?.()) return true;
       await this.avPlayer.resume();
       if (this.avPlayer.isSuspended?.()) {
-        const error = new Error('iPad/iPhone 需要点击播放器后才能启动 HEVC 音视频解码');
+        const error = new Error('需要点击播放器后才能继续兼容播放');
         error.name = 'NotAllowedError';
         throw error;
       }
@@ -434,6 +398,7 @@
     removeAttribute(name) {
       if (name !== 'src') return;
       this.source = '';
+      this.nativeFirstFrame = false;
       this.suppressNative = true;
       this.video?.removeAttribute('src');
       this.suppressNative = false;
@@ -441,6 +406,7 @@
 
     load() {
       const source = this.source;
+      this.nativeFirstFrame = false;
       if (!source) {
         ++this.loadToken;
         this._destroyAVPlayer().catch(() => {});
@@ -451,7 +417,6 @@
         this.suppressNative = false;
         return;
       }
-
       ++this.loadToken;
       this._destroyAVPlayer().catch(() => {});
       this._showMode('native');
@@ -465,16 +430,9 @@
     async play() {
       if (this.mode === 'native') return this.video.play();
       if (!this.avPlayer) throw new Error('兼容播放器尚未就绪');
-      // A real tap may unlock iOS audio before AVPlayer enters/continues PLAYED.
-      // Programmatic sync calls must not block video when audio is still locked:
-      // libmedia can continue MSE playback muted or decoder video via fakePlay.
-      if (this.avPlayer.isSuspended?.() && navigator.userActivation?.isActive) {
-        await this.unlock().catch(() => {});
-      }
+      if (this.avPlayer.isSuspended?.() && navigator.userActivation?.isActive) await this.unlock().catch(() => {});
       const result = await this.avPlayer.play({ subtitle: false });
-      if (this.avPlayer.isSuspended?.()) {
-        this._requestInteraction({ reason: 'audio-context' });
-      }
+      if (this.avPlayer.isSuspended?.()) this._requestInteraction({ reason: 'audio-context' });
       return result;
     }
 
@@ -484,9 +442,7 @@
       return this.avPlayer.pause();
     }
 
-    get currentTime() {
-      return this.mode === 'native' ? Number(this.video.currentTime || 0) : Number(this.avCurrentTime || 0);
-    }
+    get currentTime() { return this.mode === 'native' ? Number(this.video.currentTime || 0) : Number(this.avCurrentTime || 0); }
     set currentTime(value) {
       const target = Math.max(0, Number(value || 0));
       if (this.mode === 'native') {
@@ -501,9 +457,7 @@
       });
     }
 
-    get duration() {
-      return this.mode === 'native' ? Number(this.video.duration) : Number(this.avDuration);
-    }
+    get duration() { return this.mode === 'native' ? Number(this.video.duration) : Number(this.avDuration); }
     get paused() { return this.mode === 'native' ? this.video.paused : this.avPaused; }
     get seeking() { return this.mode === 'native' ? this.video.seeking : this.avSeeking; }
     get ended() { return this.mode === 'native' ? this.video.ended : this.avEnded; }
@@ -514,34 +468,41 @@
       return HTMLMediaElement.HAVE_NOTHING;
     }
     get error() { return this.mode === 'native' ? this.video.error : this.avError; }
+    get hasRenderedFrame() { return this.mode === 'native' ? this.nativeFirstFrame : this.avFirstFrame; }
+    get fallbackAvailable() { return !isAppleMobile(); }
 
-    get playbackRate() {
-      return this.mode === 'native' ? Number(this.video.playbackRate || 1) : Number(this.avRate || 1);
-    }
+    get playbackRate() { return this.mode === 'native' ? Number(this.video.playbackRate || 1) : Number(this.avRate || 1); }
     set playbackRate(value) {
       const rate = Math.min(2, Math.max(0.5, Number(value || 1)));
-      if (this.mode === 'native') {
-        this.video.playbackRate = rate;
-        return;
+      if (this.mode === 'native') this.video.playbackRate = rate;
+      else {
+        this.avRate = rate;
+        this.avPlayer?.setPlaybackRate(rate);
+        this._emit('ratechange');
       }
-      this.avRate = rate;
-      this.avPlayer?.setPlaybackRate(rate);
-      this._emit('ratechange');
     }
 
-    get volume() {
-      return this.mode === 'native' ? Number(this.video.volume ?? 1) : Number(this.avVolume ?? 1);
-    }
+    get volume() { return this.mode === 'native' ? Number(this.video.volume ?? 1) : Number(this.avVolume ?? 1); }
     set volume(value) {
       const volume = Math.min(1, Math.max(0, Number(value ?? 1)));
-      if (this.mode === 'native') {
-        this.video.volume = volume;
-        return;
+      if (this.mode === 'native') this.video.volume = volume;
+      else {
+        this.avVolume = volume;
+        this.avPlayer?.setVolume(volume);
+        this._updateControls();
+        this._emit('volumechange');
       }
-      this.avVolume = volume;
-      this.avPlayer?.setVolume(volume);
-      this._updateControls();
-      this._emit('volumechange');
+    }
+
+    getBufferedAhead() {
+      if (this.mode !== 'native' || !this.video?.buffered) return NaN;
+      const current = Number(this.video.currentTime || 0);
+      for (let i = 0; i < this.video.buffered.length; i += 1) {
+        const start = this.video.buffered.start(i);
+        const end = this.video.buffered.end(i);
+        if (current >= start - 0.05 && current <= end + 0.05) return Math.max(0, end - current);
+      }
+      return 0;
     }
 
     getStats() {
