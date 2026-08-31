@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'hybrid-media.js'), 'utf8');
-const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app-3.1.js'), 'utf8');
 
 test('Safari/iPad never enters the libmedia fallback path', () => {
   assert.match(source, /if \(isAppleMobile\(\)\) \{[\s\S]{0,500}fallbackunavailable/);
@@ -26,14 +26,15 @@ test('player exposes rendered-frame and buffered-ahead state', () => {
   assert.match(source, /getBufferedAhead\(\)/);
 });
 
-test('initial media preparation does not enter shared buffering protection', () => {
-  assert.match(appSource, /mediaRecovery\.reset\(\{ preparing: true \}\)/);
-  assert.match(appSource, /state\.mediaReady = false;[\s\S]{0,180}setBuffering\(false\)/);
-  const fallbackStart = appSource.match(/player\.addEventListener\('fallbackstart'[\s\S]*?\n\}\);/s)?.[0] || '';
-  assert.ok(fallbackStart);
-  assert.doesNotMatch(fallbackStart, /setBuffering\(true\)/);
+test('barrier preparation owns seeking and does not report it as playback buffering', () => {
+  assert.match(appSource, /function prepareBarrier\(barrier\)/);
+  assert.match(appSource, /pauseLocal\(\)/);
+  assert.match(appSource, /setProgrammaticSeek\(Number\(barrier\.target \|\| 0\)\)/);
+  const beginBuffering = appSource.match(/function beginBuffering\(\)[\s\S]*?function endBuffering/)?.[0] || '';
+  assert.match(beginBuffering, /player\.seeking \|\| state\.barrier/);
 });
 
-test('sync corrections are frozen during media recovery', () => {
-  assert.match(appSource, /mediaRecovery\.shouldFreezeSync\(\)[\s\S]{0,700}暂停对轴/);
+test('3.1 never uses media recovery to drive timeline correction', () => {
+  assert.doesNotMatch(appSource, /MediaRecovery|SyncPolicy|correctionRate/);
+  assert.match(appSource, /emitControl\('player:desync'/);
 });
