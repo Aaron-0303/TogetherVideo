@@ -22,47 +22,60 @@ function registerSocketGateway(options = {}) {
     socket.data.participantId = participantId;
     socket.data.nickname = nickname;
 
+    // If this is the second viewer entering an already-running movie, the join
+    // itself opens a barrier and pauses the existing viewer. Both clients then
+    // buffer the same target and restart together.
+    coordinator.handleJoin(participantId, nickname);
     socket.emit('room:snapshot', room.snapshot());
+    coordinator.sendBarrier(socket);
     coordinator.broadcastPresence();
-    coordinator.coordinateBuffering();
 
     socket.on('sync:request', (ack = () => {}) => {
       if (typeof ack !== 'function') return;
-      ack({ ...room.snapshot(), reason: 'sync' });
+      ack({ ...room.snapshot(), reason: 'sync', serverNow: Date.now() });
     });
 
     socket.on('presence:buffering', (payload = {}) => {
       coordinator.setBuffering(participantId, socket.id, payload.buffering);
     });
 
-    const apply = (action, payload = {}, applyOptions = {}) => {
-      const snapshot = room.apply(action, payload, nickname);
-      if (!snapshot) return;
-
-      if (applyOptions.noSelfEcho) {
-        socket.emit('room:state', { ...snapshot, reason: `${snapshot.reason}-ack` });
-        socket.broadcast.emit('room:state', snapshot);
-      } else {
-        io.emit('room:state', snapshot);
-      }
-      coordinator.coordinateBuffering();
-    };
+    socket.on('player:ready', (payload = {}) => {
+      coordinator.markReady(participantId, socket.id, payload);
+    });
 
     socket.on('media:select', (payload = {}) => {
       const mediaPath = cleanMediaPath(payload.mediaPath);
       if (!mediaPath || !mediaService.isSupportedPath(mediaPath)) return;
-      apply('select', { mediaPath, mediaName: payload.mediaName });
+      coordinator.cancelBarrier('media-select');
+      coordinator.resetBuffering();
+      const snapshot = room.apply('select', { mediaPath, mediaName: payload.mediaName }, nickname);
+      if (snapshot) io.emit('room:state', snapshot);
     });
-    socket.on('player:play', (payload = {}) => apply('play', payload));
-    socket.on('player:pause', (payload = {}) => apply('pause', payload));
-    socket.on('player:seek', (payload = {}) => apply('seek', payload, { noSelfEcho: true }));
-    socket.on('player:rate', (payload = {}) => apply('rate', payload));
+
+    socket.on('player:play', (payload = {}) => {
+      coordinator.requestPlay(payload, nickname);
+    });
+
+    socket.on('player:pause', (payload = {}) => {
+      coordinator.requestPause(payload, nickname);
+    });
+
+    socket.on('player:seek', (payload = {}) => {
+      coordinator.requestSeek(payload, nickname);
+    });
+
+    socket.on('player:rate', (payload = {}) => {
+      coordinator.cancelBarrier('rate-change');
+      const snapshot = room.apply('rate', payload, nickname);
+      if (snapshot) io.emit('room:state', snapshot);
+    });
+
+    socket.on('player:desync', (payload = {}) => {
+      coordinator.requestResync(payload, nickname);
+    });
+
     socket.on('player:wait', () => {
-      const snapshot = room.apply('wait', {}, nickname);
-      if (!snapshot) return;
-      io.emit('room:state', snapshot);
-      io.emit('room:wait', { nickname });
-      coordinator.coordinateBuffering();
+      coordinator.requestWait(nickname);
     });
 
     socket.on('disconnect', () => {
