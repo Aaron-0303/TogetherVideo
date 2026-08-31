@@ -1,6 +1,6 @@
 (() => {
   const player = window.TogetherMediaPlayer;
-  const video = document.getElementById('video');
+  const video = player?.video || document.getElementById('video');
   const overlay = document.getElementById('resumeOverlay');
   if (!player || !video || !overlay || player.__togetherUnlockPatched) return;
 
@@ -18,10 +18,9 @@
     overlay.classList.remove('hidden');
   }
 
-  // A viewer who joins an already-playing room has not necessarily interacted
-  // with the media element. Safari/Chrome are therefore allowed to reject an
-  // unmuted play() call. Falling back to muted playback keeps video decoding and
-  // Range loading alive; one explicit tap then unlocks audio.
+  // A late viewer may not have interacted with the page yet. Keep the native
+  // Artplayer video decoding/range pipeline alive by retrying muted, then let one
+  // explicit tap unlock sound inside the browser's user-gesture boundary.
   player.play = async (...args) => {
     try {
       return await originalPlay(...args);
@@ -39,19 +38,12 @@
         throw mutedError;
       }
 
-      // Keep the existing app-level interaction flow active. The video is now
-      // actually running muted, but app.js should still leave the overlay visible
-      // until the viewer explicitly unlocks sound.
       throw error;
     }
   };
 
   overlay.addEventListener('click', (event) => {
     if (!video.muted) return;
-
-    // This handler runs in capture phase so the browser sees the unmute directly
-    // inside the user gesture. If playback is already running, no second play()
-    // transaction is needed and app.js must not leave a stale expectedPlay flag.
     video.muted = false;
     video.defaultMuted = false;
     overlay.classList.add('hidden');
