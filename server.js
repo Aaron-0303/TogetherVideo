@@ -219,7 +219,7 @@ async function main() {
     return last || { ok: false, status: 0, error: 'probe-failed' };
   }
 
-  app.get('/healthz', (_req, res) => res.json({ ok: true, version: '2.0.0' }));
+  app.get('/healthz', (_req, res) => res.json({ ok: true, version: '2.1.0' }));
 
   app.post('/api/login', (req, res) => {
     if (!settings.verifySitePassword(req.body?.password)) {
@@ -440,6 +440,18 @@ async function main() {
     });
   });
 
+  // AVPlayer's ESM build dynamically imports format / IO / pipeline chunks from
+  // the same directory. Serve the whole published dist/esm directory directly
+  // so TogetherVideo keeps its zero-build deployment model.
+  const libmediaAvPlayerDir = path.join(process.cwd(), 'node_modules', '@libmedia', 'avplayer', 'dist', 'esm');
+  app.use('/vendor/libmedia/avplayer', express.static(libmediaAvPlayerDir, {
+    etag: true,
+    maxAge: '1d',
+    setHeaders(res) {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+    },
+  }));
+
   const publicDir = path.join(process.cwd(), 'public');
   app.get(['/', '/index.html'], (_req, res) => {
     res.set('Cache-Control', 'no-store');
@@ -468,11 +480,12 @@ async function main() {
   });
 
   server.listen(config.port, config.host, () => {
-    console.log(`[TogetherVideo 2.0] listening on ${config.host}:${config.port}`);
-    console.log('[TogetherVideo 2.0] fixed two-person room; no room codes');
-    console.log('[TogetherVideo 2.0] WebDAV is used only for metadata and direct-link discovery');
-    console.log('[TogetherVideo 2.0] media bytes are never proxied by this server');
-    console.log('[TogetherVideo 2.0] sync uses conservative drift correction and shared buffering protection');
+    console.log(`[TogetherVideo 2.1] listening on ${config.host}:${config.port}`);
+    console.log('[TogetherVideo 2.1] fixed two-person room; no room codes');
+    console.log('[TogetherVideo 2.1] native video first, libmedia HEVC fallback on browser failure');
+    console.log('[TogetherVideo 2.1] WebDAV is used only for metadata and direct-link discovery');
+    console.log('[TogetherVideo 2.1] media bytes are never proxied by this server');
+    console.log('[TogetherVideo 2.1] sync uses conservative drift correction and shared buffering protection');
   });
 }
 
