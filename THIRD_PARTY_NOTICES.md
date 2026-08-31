@@ -1,13 +1,13 @@
 # Third-Party Notices
 
-TogetherVideo 2.1 optionally uses the following browser playback component when the native HTML5 video element cannot play a media source.
+TogetherVideo 3.2 uses the following browser player component for its playback UI and controls.
 
-## libmedia / @libmedia/avplayer
+## ArtPlayer / artplayer
 
-- Project: `zhaohappy/libmedia`
-- Package: `@libmedia/avplayer` 1.3.1
-- Copyright: Gaoxing Zhao and libmedia contributors
-- License: GNU Lesser General Public License v3.0 or later (LGPL-3.0-or-later)
-- Upstream: https://github.com/zhaohappy/libmedia
+- Project: `zhw2590582/ArtPlayer`
+- Package: `artplayer` 5.4.0
+- Copyright: Harvey Zhao and ArtPlayer contributors
+- License: MIT
+- Upstream: https://github.com/zhw2590582/ArtPlayer
 
-TogetherVideo loads the published AVPlayer browser distribution without modifying its source. The package's own license files remain available in the installed npm package.
+TogetherVideo serves the published ArtPlayer browser distribution from its installed npm package. ArtPlayer wraps the browser's native HTML5 video element; TogetherVideo does not use ArtPlayer as a media proxy or transcoder. Video bytes are read directly by the browser from the provider media URL.
