@@ -25,6 +25,27 @@ test('wait pauses the authoritative timeline', () => {
   assert.equal(paused.reason, 'wait');
 });
 
+test('scheduled play does not advance before the shared startAt', () => {
+  const room = new WatchRoom();
+  const selected = room.apply('select', { mediaPath: 'movie.mp4' }, 'A');
+  const now = Date.now();
+  const startAt = now + 1000;
+  const started = room.apply('play', {
+    mediaPath: 'movie.mp4',
+    mediaVersion: selected.mediaVersion,
+    position: 30,
+    startAt,
+    reason: 'barrier-release',
+  }, '同步开始');
+
+  assert.equal(started.playing, true);
+  assert.ok(started.startAt >= startAt - 5);
+  const before = room.snapshot(now + 500);
+  assert.ok(Math.abs(before.position - 30) < 0.01);
+  const after = room.snapshot(now + 1500);
+  assert.ok(after.position >= 30.45 && after.position <= 30.55);
+});
+
 test('rate change keeps the same media version', () => {
   const room = new WatchRoom();
   const selected = room.apply('select', { mediaPath: 'movie.mp4' }, 'A');
@@ -33,7 +54,7 @@ test('rate change keeps the same media version', () => {
   assert.equal(changed.mediaVersion, selected.mediaVersion);
 });
 
-test('internal smooth-correction rates cannot become authoritative room rates', () => {
+test('only explicit menu playback rates can become authoritative room rates', () => {
   const room = new WatchRoom();
   const selected = room.apply('select', { mediaPath: 'movie.mp4' }, 'A');
   const leakedFast = room.apply('rate', { mediaPath: 'movie.mp4', mediaVersion: selected.mediaVersion, rate: 1.012 }, 'A');
