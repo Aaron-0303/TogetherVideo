@@ -60,20 +60,32 @@ class MediaService {
     return { path: result.relativePath || '', items };
   }
 
-  async resolvePlayable(mediaPath) {
+  async resolvePlayable(mediaPath, options = {}) {
+    const fresh = Boolean(options.fresh);
     const now = Date.now();
-    const cached = this.playableCache.get(mediaPath);
-    if (cached && cached.expiresAt > now) return cached.playable;
-    if (cached) this.playableCache.delete(mediaPath);
+
+    // Signed provider URLs are transport credentials, not application state.
+    // Never force two browsers to share a cached URL when the caller asks for a
+    // fresh transport. This matters for late joiners because some provider/CDN
+    // links can be scoped, short lived or invalidated independently per client.
+    if (!fresh) {
+      const cached = this.playableCache.get(mediaPath);
+      if (cached && cached.expiresAt > now) return cached.playable;
+      if (cached) this.playableCache.delete(mediaPath);
+    }
 
     const playable = await this.currentWebDav().resolvePlayable(mediaPath);
-    this.playableCache.set(mediaPath, { playable, expiresAt: now + this.cacheTtlMs });
-    if (this.playableCache.size > 100) {
-      for (const [key, value] of this.playableCache) {
-        if (value.expiresAt <= now) this.playableCache.delete(key);
+
+    if (!fresh) {
+      this.playableCache.set(mediaPath, { playable, expiresAt: now + this.cacheTtlMs });
+      if (this.playableCache.size > 100) {
+        for (const [key, value] of this.playableCache) {
+          if (value.expiresAt <= now) this.playableCache.delete(key);
+        }
+        while (this.playableCache.size > 100) this.playableCache.delete(this.playableCache.keys().next().value);
       }
-      while (this.playableCache.size > 100) this.playableCache.delete(this.playableCache.keys().next().value);
     }
+
     return playable;
   }
 
