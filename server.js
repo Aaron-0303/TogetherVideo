@@ -23,8 +23,11 @@ const MEDIA_MIME = new Map([
   ['.mkv', 'video/x-matroska'],
 ]);
 const PLAYABLE_CACHE_TTL_MS = 10_000;
-const BUFFERING_PAUSE_DELAY_MS = 1500;
-const BUFFERING_RESUME_DELAY_MS = 800;
+// Client-side recovery already waits before reporting a real stall. Give the
+// reported stall another short confirmation window so seek/startup transients
+// never make both viewers visibly pause and resume.
+const BUFFERING_PAUSE_DELAY_MS = 2500;
+const BUFFERING_RESUME_DELAY_MS = 1000;
 
 function cleanName(value) {
   return String(value || '访客').trim().replace(/[<>]/g, '').slice(0, 20) || '访客';
@@ -219,7 +222,7 @@ async function main() {
     return last || { ok: false, status: 0, error: 'probe-failed' };
   }
 
-  app.get('/healthz', (_req, res) => res.json({ ok: true, version: '3.0.0' }));
+  app.get('/healthz', (_req, res) => res.json({ ok: true, version: '3.0.3' }));
 
   app.post('/api/login', (req, res) => {
     if (!settings.verifySitePassword(req.body?.password)) {
@@ -469,12 +472,13 @@ async function main() {
   });
 
   server.listen(config.port, config.host, () => {
-    console.log(`[TogetherVideo 3.0] listening on ${config.host}:${config.port}`);
-    console.log('[TogetherVideo 3.0] fixed two-person room; no room codes');
-    console.log('[TogetherVideo 3.0] Safari stays on the native media pipeline; unstable libmedia Safari fallback is disabled');
-    console.log('[TogetherVideo 3.0] media recovery freezes seek/rate correction until stable playback is proven');
-    console.log('[TogetherVideo 3.0] WebDAV is used only for metadata and direct-link discovery');
-    console.log('[TogetherVideo 3.0] media bytes are never proxied by this server');
+    console.log(`[TogetherVideo 3.0.3] listening on ${config.host}:${config.port}`);
+    console.log('[TogetherVideo 3.0.3] fixed two-person room; no room codes');
+    console.log('[TogetherVideo 3.0.3] late-join catch-up and intentional seeks do not trigger shared buffering protection');
+    console.log('[TogetherVideo 3.0.3] Safari stays on the native media pipeline; unstable libmedia Safari fallback is disabled');
+    console.log('[TogetherVideo 3.0.3] media recovery freezes seek/rate correction until stable playback is proven');
+    console.log('[TogetherVideo 3.0.3] WebDAV is used only for metadata and direct-link discovery');
+    console.log('[TogetherVideo 3.0.3] media bytes are never proxied by this server');
   });
 }
 
