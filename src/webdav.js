@@ -58,6 +58,22 @@ function bestProp(response) {
   return asArray(response?.propstat)[0]?.prop || {};
 }
 
+function is123PanWebDavHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host === 'webdav.123pan.cn'
+    || /^webdav-[a-z0-9.-]+\.pd\d+\.123pan\.cn$/i.test(host);
+}
+
+function canForwardWebDavAuth(fromUrl, toUrl) {
+  const from = new URL(fromUrl);
+  const to = new URL(toUrl);
+  if (from.origin === to.origin) return true;
+  return from.protocol === 'https:'
+    && to.protocol === 'https:'
+    && is123PanWebDavHost(from.hostname)
+    && is123PanWebDavHost(to.hostname);
+}
+
 class WebDavClient {
   constructor(options = {}) {
     this.timeoutMs = Number(options.timeoutMs || 15000);
@@ -109,9 +125,6 @@ class WebDavClient {
 
   checkStatus(response) {
     if (response.status === 401 || response.status === 403) {
-      // Upstream WebDAV authentication failure is a settings-validation error,
-      // not a TogetherVideo session failure. Use 422 so the frontend stays in
-      // the settings dialog instead of treating it as a site-login expiration.
       throw new WebDavError('WebDAV 用户名或密码错误，或没有访问权限', 422, 'WEBDAV_AUTH_FAILED');
     }
     if (response.status === 404) throw new WebDavError('WebDAV 路径不存在', 404, 'WEBDAV_NOT_FOUND');
@@ -121,14 +134,36 @@ class WebDavClient {
   }
 
   async propfind(relativePath = '', depth = 1) {
-    const url = this.buildUrl(relativePath);
+    let url = this.buildUrl(relativePath);
     const body = `<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:"><d:prop><d:displayname/><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/></d:prop></d:propfind>`;
-    const response = await this.fetchWithTimeout(url, {
-      method: 'PROPFIND',
-      headers: this.headers({ Depth: String(depth), 'Content-Type': 'application/xml; charset=utf-8' }),
-      body,
-      redirect: 'follow',
-    });
+    let response = null;
+
+    for (let redirects = 0; redirects <= 4; redirects++) {
+      response = await this.fetchWithTimeout(url, {
+        method: 'PROPFIND',
+        headers: this.headers({ Depth: String(depth), 'Content-Type': 'application/xml; charset=utf-8' }),
+        body,
+        redirect: 'manual',
+      });
+
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+
+      const location = response.headers.get('location');
+      await response.body?.cancel().catch(() => {});
+      if (!location) throw new WebDavError('WebDAV 返回了重定向但没有 Location', 502, 'WEBDAV_BAD_REDIRECT');
+      if (redirects === 4) throw new WebDavError('WebDAV 重定向次数过多', 502, 'WEBDAV_TOO_MANY_REDIRECTS');
+
+      const nextUrl = new URL(location, url).toString();
+      if (!canForwardWebDavAuth(url, nextUrl)) {
+        throw new WebDavError(
+          'WebDAV 把认证请求重定向到了其他域名。为避免泄露账号和应用密码，TogetherVideo 已拒绝继续发送认证信息。',
+          409,
+          'WEBDAV_UNTRUSTED_AUTH_REDIRECT',
+        );
+      }
+      url = nextUrl;
+    }
+
     this.checkStatus(response);
     const xml = await response.text();
     let parsed;
@@ -159,7 +194,7 @@ class WebDavClient {
     for (const response of responses) {
       const href = String(response?.href || '');
       let hrefPath = '';
-      try { hrefPath = decodeURIComponent(new URL(href, this.baseUrl).pathname).replace(/\/+$/, '') || '/'; }
+      try { hrefPath = decodeURIComponent(new URL(href, url).pathname).replace(/\/+$/, '') || '/'; }
       catch { continue; }
       if (hrefPath === requestedPath) continue;
 
@@ -223,4 +258,11 @@ class WebDavClient {
   }
 }
 
-module.exports = { WebDavClient, WebDavError, normalizeBaseUrl, normalizeRoot, cleanRelative };
+module.exports = {
+  WebDavClient,
+  WebDavError,
+  normalizeBaseUrl,
+  normalizeRoot,
+  cleanRelative,
+  canForwardWebDavAuth,
+};
