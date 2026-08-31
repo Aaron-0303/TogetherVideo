@@ -2,6 +2,9 @@
   const ArtplayerClass = window.Artplayer;
   if (!ArtplayerClass) throw new Error('Artplayer runtime is not loaded');
 
+  const BRIDGE_SCRIPT = '/sw.js?v=3.2.1';
+  const BRIDGE_READY_TIMEOUT_MS = 12000;
+
   function safeDispatch(target, type, detail) {
     try {
       target.dispatchEvent(detail === undefined ? new Event(type) : new CustomEvent(type, { detail }));
@@ -80,7 +83,7 @@
       } catch {}
 
       this._bindNativeEvents();
-      this._retireLegacyServiceWorkers();
+      this.bridgeReady = this._ensureMediaBridgeReady();
     }
 
     _bindNativeEvents() {
@@ -103,28 +106,49 @@
       });
     }
 
-    _retireLegacyServiceWorkers() {
-      if (!('serviceWorker' in navigator)) return;
-      navigator.serviceWorker.getRegistrations()
-        .then((registrations) => Promise.allSettled(registrations.map((registration) => registration.unregister())))
-        .catch(() => {});
+    async _ensureMediaBridgeReady() {
+      if (!('serviceWorker' in navigator)) {
+        throw new Error('当前浏览器无法启用媒体 MIME 兼容层，请确认使用 HTTPS。');
+      }
+
+      const desiredScript = new URL(BRIDGE_SCRIPT, location.href).href;
+      const registration = await navigator.serviceWorker.register(BRIDGE_SCRIPT, { scope: '/' });
+      try { await registration.update(); } catch {}
+      await navigator.serviceWorker.ready;
+
+      const controlledByDesiredWorker = () => (
+        navigator.serviceWorker.controller?.scriptURL === desiredScript
+      );
+      if (controlledByDesiredWorker()) return registration;
+
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          reject(new Error('3.2.1 媒体兼容层未能接管页面，请刷新后重试。'));
+        }, BRIDGE_READY_TIMEOUT_MS);
+
+        const onControllerChange = () => {
+          if (!controlledByDesiredWorker()) return;
+          clearTimeout(timer);
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          resolve();
+        };
+
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        onControllerChange();
+      });
+
+      return registration;
     }
 
-    async _resolveDirectSource(source, token) {
-      const mediaPath = logicalMediaPath(source);
-      if (!mediaPath) return new URL(source, location.href).toString();
-
-      const response = await fetch(`/api/media/url?path=${encodeURIComponent(mediaPath)}`, {
-        credentials: 'same-origin',
-        cache: 'no-store',
-        headers: { Accept: 'application/json' },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.ok === false || !data.url) {
-        throw new Error(data.error || `媒体地址解析失败 (${response.status})`);
-      }
-      if (token !== this.loadToken) throw new DOMException('stale media load', 'AbortError');
-      return data.url;
+    _assignNativeSource(source, token) {
+      if (token !== this.loadToken) return;
+      const resolved = new URL(source, location.href).toString();
+      this.resolvedSource = resolved;
+      this.video.src = resolved;
+      this.video.preload = 'metadata';
+      this.video.load();
+      safeDispatch(this.events, 'sourcechange', { source, resolved });
     }
 
     load() {
@@ -140,20 +164,20 @@
         return;
       }
 
-      // The logical URL stays same-origin for room state/diagnostics, but the
-      // actual HTMLVideoElement receives the final CDN URL. No Service Worker,
-      // fetch-stream wrapper or manual Range slicing sits in the media path.
-      this._resolveDirectSource(source, token)
-        .then((resolved) => {
-          if (token !== this.loadToken) return;
-          this.resolvedSource = resolved;
-          this.video.src = resolved;
-          this.video.preload = 'metadata';
-          this.video.load();
-          safeDispatch(this.events, 'sourcechange', { source, resolved });
-        })
+      const mediaPath = logicalMediaPath(source);
+      if (!mediaPath) {
+        this._assignNativeSource(source, token);
+        return;
+      }
+
+      // Keep the native media URL same-origin so the 3.2.1 Service Worker can
+      // normalize only the provider response headers. The worker forwards the
+      // browser's own Range request unchanged and never sends video bytes through
+      // the TogetherVideo server.
+      Promise.resolve(this.bridgeReady)
+        .then(() => this._assignNativeSource(source, token))
         .catch((error) => {
-          if (token !== this.loadToken || error?.name === 'AbortError') return;
+          if (token !== this.loadToken) return;
           this._loadError = { code: 2, message: error?.message || String(error) };
           safeDispatch(this.events, 'error');
         });
