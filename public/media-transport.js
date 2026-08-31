@@ -3,12 +3,36 @@
   let mode = supported ? 'registering' : 'direct';
   let readyPromise = null;
 
+  function retryFailedMediaSoon() {
+    for (const delay of [0, 500, 1500]) {
+      setTimeout(() => {
+        const video = document.getElementById('video');
+        const raw = video?.getAttribute('src') || '';
+        if (!video || !raw || !video.error) return;
+        try {
+          const url = new URL(raw, location.href);
+          if (url.pathname !== '/api/media') return;
+        } catch { return; }
+
+        // The first request may have escaped through the old 307 path before a
+        // freshly-installed worker claimed this page. Reload only a failed media
+        // element; never interrupt a video that is already playing normally.
+        video.removeAttribute('src');
+        video.load();
+        video.src = raw;
+        video.load();
+      }, delay);
+    }
+  }
+
   function waitForController(timeoutMs = 5000) {
     if (navigator.serviceWorker.controller) return Promise.resolve(true);
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(Boolean(navigator.serviceWorker.controller)), timeoutMs);
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         clearTimeout(timer);
+        mode = 'service-worker';
+        retryFailedMediaSoon();
         resolve(true);
       }, { once: true });
     });
