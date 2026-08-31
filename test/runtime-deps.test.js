@@ -35,6 +35,19 @@ test('2.1 HEVC fallback dependency ships browser ESM assets', () => {
   const entry = path.join(esmDir, 'avplayer.js');
   assert.ok(fs.existsSync(entry), 'libmedia AVPlayer ESM entry must exist after npm install');
 
-  const chunks = fs.readdirSync(esmDir).filter((name) => /^\d+\.avplayer\.js$/.test(name));
+  const files = fs.readdirSync(esmDir).filter((name) => name.endsWith('.js'));
+  const chunks = files.filter((name) => /^\d+\.avplayer\.js$/.test(name));
   assert.ok(chunks.length > 0, 'libmedia dynamic AVPlayer chunks must be installed beside avplayer.js');
+
+  // TogetherVideo serves this prebuilt ESM directory directly to browsers. A
+  // bare npm specifier such as @libmedia/avutil would require an import map or a
+  // bundler, neither of which is part of the zero-build deployment model.
+  for (const name of files) {
+    const source = fs.readFileSync(path.join(esmDir, name), 'utf8');
+    assert.doesNotMatch(
+      source,
+      /(?:\bfrom\s*|\bimport\s*\()\s*['"]@libmedia\//,
+      `${name} must not contain bare @libmedia imports`,
+    );
+  }
 });
