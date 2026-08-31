@@ -4,6 +4,8 @@
  * proxies, buffers, or caches media bytes.
  */
 const SOURCE_TTL_MS = 120000;
+const RESOLVER_TIMEOUT_MS = 12000;
+const PROVIDER_HEADER_TIMEOUT_MS = 15000;
 const sourceCache = new Map();
 
 self.addEventListener('install', () => self.skipWaiting());
@@ -18,6 +20,18 @@ function mimeForPath(mediaPath) {
   if (clean.endsWith('.ogv') || clean.endsWith('.ogg')) return 'video/ogg';
   if (clean.endsWith('.mkv')) return 'video/x-matroska';
   return 'application/octet-stream';
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('media request timeout')), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    // fetch() resolves when response headers arrive. Do not abort the streaming
+    // response body after that point; only bound the time spent waiting for headers.
+    clearTimeout(timer);
+  }
 }
 
 async function resolveProviderUrl(mediaPath, fresh = false) {
@@ -43,7 +57,7 @@ async function resolveProviderUrl(mediaPath, fresh = false) {
     };
 
     try {
-      const response = await fetch(resolver, options);
+      const response = await fetchWithTimeout(resolver, options, RESOLVER_TIMEOUT_MS);
       lastStatus = response.status;
       const finalUrl = response.url ? new URL(response.url) : null;
       const reachedProvider = finalUrl && finalUrl.origin !== self.location.origin;
@@ -73,14 +87,14 @@ async function providerFetch(request, source) {
   // Range, bytes=0- still forces the provider into its known-good 206 path.
   headers.set('Range', request.headers.get('range') || 'bytes=0-');
 
-  return fetch(source.url, {
+  return fetchWithTimeout(source.url, {
     method: 'GET',
     headers,
     mode: 'cors',
     credentials: 'omit',
     redirect: 'follow',
     cache: 'no-store',
-  });
+  }, PROVIDER_HEADER_TIMEOUT_MS);
 }
 
 function browserMediaResponse(upstream, mime) {
@@ -110,7 +124,10 @@ async function handleMedia(request, requestUrl) {
   if (!mediaPath) return new Response('Missing media path', { status: 400 });
 
   try {
-    let source = await resolveProviderUrl(mediaPath, false);
+    // A watchdog retry marks the browser-facing request with _fresh=1. In that
+    // case bypass this browser's cached signed CDN URL and resolve a new one.
+    const forceFresh = requestUrl.searchParams.get('_fresh') === '1';
+    let source = await resolveProviderUrl(mediaPath, forceFresh);
     let upstream = await providerFetch(request, source);
 
     // Long movies may outlive a signed CDN URL. Resolve once more and repeat the
