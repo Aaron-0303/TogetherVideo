@@ -1,8 +1,28 @@
-# TogetherVideo 3.0.1
+# TogetherVideo 3.0.4
 
 只供两个人使用的固定房间同步观影网站。
 
 3.0.x 继续保持最重要的原则：**TogetherVideo 服务器不代理视频数据**。服务器只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频字节仍由 123 云盘/CDN 直接发送到各自浏览器。
+
+## 3.0.4：后端结构整理
+
+3.0.4 不改变播放、同步和媒体传输行为，主要把原来集中在 `server.js` 里的职责拆开，避免后续继续堆条件分支。
+
+```text
+server.js
+  ├─ 启动 / Session / 静态资源 / 生命周期
+  ├─ http-routes.js       HTTP API
+  ├─ socket-gateway.js    Socket.IO 事件入口
+  ├─ room-coordinator.js  在线成员与共享缓冲协调
+  ├─ watch-room.js        唯一权威播放时间线
+  ├─ media-service.js     片库、直链缓存与媒体探测
+  ├─ webdav.js            WebDAV 协议与认证重定向
+  └─ settings.js          设置与持久化
+```
+
+`server.js` 只负责组装模块，不再直接维护 participants、buffering timer、playable cache 或具体 API/Socket 业务。`WatchRoom`、`RoomCoordinator`、`MediaService` 三个状态/服务边界相互独立，修改同步算法时不应顺带修改 WebDAV，修改媒体直链时也不应修改房间时间线。
+
+CI 额外包含后端结构守卫和 `RoomCoordinator` 行为测试，防止以后把房间、媒体和路由逻辑重新堆回 `server.js`。
 
 ## 3.0：稳定播放优先
 
@@ -411,6 +431,7 @@ CI 会检查：
 - 自动重载次数上限
 - WebDAV 解析与认证重定向安全规则
 - 单房间和同步状态回归测试
+- 后端入口结构守卫与共享缓冲协调行为
 
 ## 第三方组件
 
