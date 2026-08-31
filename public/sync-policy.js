@@ -14,8 +14,8 @@
     stableSamples: 2,
     hardStableSamples: 3,
     minCorrectionDelta: 0.012,
-    maxCorrectionDelta: 0.06,
-    correctionGain: 0.04,
+    maxCorrectionDelta: 0.05,
+    correctionGain: 0.035,
     afterBufferSoftDelayMs: 3000,
     afterBufferHardDelayMs: 8000,
     hardSeekCooldownMs: 15000,
@@ -32,6 +32,8 @@
       this.driftSamples = [];
       this.correctionActive = false;
       this.correctionSign = 0;
+      this.correctionRateValue = null;
+      this.correctionBaseRate = null;
       this.lastHardSeekAt = 0;
       this.lastBufferEndAt = 0;
       this.buffering = false;
@@ -69,6 +71,8 @@
       this.resetDrift();
       this.correctionActive = false;
       this.correctionSign = 0;
+      this.correctionRateValue = null;
+      this.correctionBaseRate = null;
     }
 
     sampleDrift(drift) {
@@ -97,6 +101,23 @@
         0.25,
         4,
       );
+    }
+
+    startCorrection(drift, desiredRate) {
+      this.correctionActive = true;
+      this.correctionSign = Math.sign(drift);
+      this.correctionBaseRate = desiredRate;
+      this.correctionRateValue = this.correctionRate(drift, desiredRate);
+      return this.correctionRateValue;
+    }
+
+    activeCorrectionRate(desiredRate) {
+      if (
+        !Number.isFinite(this.correctionRateValue)
+        || !Number.isFinite(this.correctionBaseRate)
+        || Math.abs(this.correctionBaseRate - desiredRate) > 0.001
+      ) return null;
+      return this.correctionRateValue;
     }
 
     noteHardSeek(now = Date.now()) {
@@ -148,9 +169,10 @@
         };
       }
 
-      // Hysteresis: once correction starts, continue until the tighter settled
-      // threshold is reached. Large errors continue accumulating so a persistent
-      // >3 s mismatch can still escalate to one hard seek after 3 confirmations.
+      // Once a soft correction starts, keep one steady playback rate until the
+      // streams settle. Recalculating playbackRate every one-second sync sample
+      // makes Safari/Chromium repeatedly retune their media pipeline and can feel
+      // like tiny periodic stalls even though the timeline itself is continuous.
       if (this.correctionActive) {
         if (abs <= this.options.settledDrift || (this.correctionSign && sign !== this.correctionSign)) {
           this.stopCorrection();
@@ -159,6 +181,12 @@
         if (sinceBuffer < this.options.afterBufferSoftDelayMs) {
           this.stopCorrection();
           return { action: 'observe', rate, absDrift: abs, stableSamples: 0 };
+        }
+
+        const heldRate = this.activeCorrectionRate(rate);
+        if (heldRate == null) {
+          this.stopCorrection();
+          return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
         }
 
         let stableSamples = this.driftSamples.length;
@@ -176,7 +204,7 @@
 
         return {
           action: 'rate',
-          rate: this.correctionRate(value, rate),
+          rate: heldRate,
           baseRate: rate,
           absDrift: abs,
           stableSamples,
@@ -212,11 +240,10 @@
       }
 
       if (stableSamples >= this.options.stableSamples) {
-        this.correctionActive = true;
-        this.correctionSign = sign;
+        const correctionRate = this.startCorrection(value, rate);
         return {
           action: 'rate',
-          rate: this.correctionRate(value, rate),
+          rate: correctionRate,
           baseRate: rate,
           absDrift: abs,
           stableSamples,
