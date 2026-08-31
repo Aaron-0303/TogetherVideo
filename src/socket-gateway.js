@@ -23,11 +23,12 @@ function registerSocketGateway(options = {}) {
     socket.data.nickname = nickname;
 
     // If this is the second viewer entering an already-running movie, the join
-    // itself opens a barrier and pauses the existing viewer. Both clients then
-    // buffer the same target and restart together.
-    coordinator.handleJoin(participantId, nickname);
+    // itself opens a barrier and broadcasts it to both clients. Do not then send
+    // the same barrier to the joining socket a second time: on slow Safari that
+    // duplicate packet could restart the same in-flight seek.
+    const joinBarrier = coordinator.handleJoin(participantId, nickname);
     socket.emit('room:snapshot', room.snapshot());
-    coordinator.sendBarrier(socket);
+    if (!joinBarrier) coordinator.sendBarrier(socket);
     coordinator.broadcastPresence();
 
     socket.on('sync:request', (ack = () => {}) => {
