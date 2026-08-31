@@ -10,11 +10,11 @@ const routesSource = fs.readFileSync(path.join(root, 'src', 'http-routes.js'), '
 const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 const pkg = require('../package.json');
 
-test('3.2 runtime loads Artplayer and removes old media bridge layers from the page', () => {
-  assert.equal(pkg.version, '3.2.0');
+test('3.2.1 runtime keeps Artplayer and enables the minimal MIME bridge', () => {
+  assert.equal(pkg.version, '3.2.1');
   assert.match(indexSource, /\/vendor\/artplayer\/artplayer\.js\?v=5\.4\.0/);
-  assert.match(indexSource, /\/artplayer-media\.js\?v=3\.2/);
-  assert.doesNotMatch(indexSource, /media-transport\.js/);
+  assert.match(indexSource, /\/artplayer-media\.js\?v=3\.2\.1/);
+  assert.match(adapterSource, /BRIDGE_SCRIPT = '\/sw\.js\?v=3\.2\.1'/);
   assert.doesNotMatch(indexSource, /media-stability\.js/);
   assert.doesNotMatch(indexSource, /hybrid-media\.js/);
 });
@@ -28,18 +28,28 @@ test('Artplayer adapter keeps the room client API while using one native video e
   assert.match(adapterSource, /get hasRenderedFrame\(\)/);
 });
 
-test('3.2 resolves a fresh final provider URL before assigning native video src', () => {
+test('3.2.1 assigns the same-origin logical media URL only after the worker controls the page', () => {
   assert.match(routesSource, /app\.get\('\/api\/media\/url'/);
   assert.match(routesSource, /resolvePlayable\(mediaPath, \{ fresh: true \}\)/);
-  assert.match(adapterSource, /fetch\(`\/api\/media\/url\?path=/);
+  assert.match(adapterSource, /navigator\.serviceWorker\.register\(BRIDGE_SCRIPT/);
+  assert.match(adapterSource, /Promise\.resolve\(this\.bridgeReady\)/);
   assert.match(adapterSource, /this\.video\.src = resolved/);
+  assert.doesNotMatch(adapterSource, /fetch\(`\/api\/media\/url\?path=/);
 });
 
-test('native media path does not manually proxy or slice Range requests', () => {
-  assert.doesNotMatch(adapterSource, /Range\s*:/);
-  assert.doesNotMatch(adapterSource, /Content-Range/);
-  assert.doesNotMatch(adapterSource, /ReadableStream/);
-  assert.doesNotMatch(adapterSource, /serviceWorker\.register/);
+test('MIME bridge forwards native Range unchanged and never slices it', () => {
+  assert.match(serverSource, /const range = request\.headers\.get\('range'\)/);
+  assert.match(serverSource, /if \(range\) headers\.set\('Range', range\)/);
+  assert.doesNotMatch(serverSource, /RANGE_CHUNK_BYTES/);
+  assert.doesNotMatch(serverSource, /boundedMediaRange/);
+});
+
+test('MIME bridge repairs 123 download headers without proxying through Node', () => {
+  assert.match(serverSource, /headers\.set\('Content-Type', mimeForPath\(mediaPath\)\)/);
+  assert.match(serverSource, /headers\.set\('Content-Disposition', 'inline'\)/);
+  assert.match(serverSource, /headers\.set\('Accept-Ranges', 'bytes'\)/);
+  assert.match(serverSource, /X-TogetherVideo-Media-Mode', 'mime-bridge'/);
+  assert.match(serverSource, /media bytes are never proxied by this server/);
 });
 
 test('server serves Artplayer from the installed npm package', () => {
