@@ -60,7 +60,10 @@ test('sustained buffering opens the same readiness barrier instead of auto-resum
 });
 
 test('late join is explicitly converted into a pause-and-prepare barrier', () => {
-  assert.match(coordinatorSource, /handleJoin\(participantId, nickname\)/);
-  assert.match(coordinatorSource, /current\.playing[\s\S]{0,300}reason: 'join'/);
+  const joinBlock = coordinatorSource.match(/handleJoin\(participantId, nickname\)[\s\S]*?\n\s*unregisterParticipant/)?.[0] || '';
+  assert.ok(joinBlock);
+  assert.match(joinBlock, /current\.playing/);
+  assert.match(joinBlock, /reason: 'join'/);
+  assert.match(joinBlock, /beginBarrier\(/);
   assert.match(appSource, /对方加入，已暂停。双方缓存到同一位置后会同时继续播放。/);
 });
