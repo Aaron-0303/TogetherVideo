@@ -74,6 +74,10 @@ function canForwardWebDavAuth(fromUrl, toUrl) {
     && is123PanWebDavHost(to.hostname);
 }
 
+function isRedirectStatus(status) {
+  return [301, 302, 303, 307, 308].includes(Number(status));
+}
+
 class WebDavClient {
   constructor(options = {}) {
     this.timeoutMs = Number(options.timeoutMs || 15000);
@@ -148,7 +152,7 @@ class WebDavClient {
         redirect: 'manual',
       });
 
-      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      if (!isRedirectStatus(response.status)) break;
 
       const location = response.headers.get('location');
       await response.body?.cancel().catch(() => {});
@@ -221,20 +225,53 @@ class WebDavClient {
   }
 
   async probeDirect(relativePath, method) {
-    const url = this.buildUrl(relativePath);
-    const headers = this.headers(method === 'GET' ? { Range: 'bytes=0-0' } : {});
-    const response = await this.fetchWithTimeout(url, { method, headers, redirect: 'manual' });
-    if (response.status === 401 || response.status === 403) this.checkStatus(response);
+    let url = this.buildUrl(relativePath);
+    let useAuth = true;
+    const baseHeaders = method === 'GET' ? { Range: 'bytes=0-0' } : {};
 
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('location');
+    // Resolve the whole redirect chain server-side using headers only. Credentials
+    // are kept only while the request remains on the same origin or on trusted
+    // 123pan WebDAV nodes. Once the chain leaves the authenticated WebDAV area,
+    // all following probes are deliberately anonymous. This gives mobile Safari
+    // a browser-ready URL instead of an intermediate authenticated redirect.
+    for (let step = 0; step < 8; step++) {
+      const headers = useAuth ? this.headers(baseHeaders) : { ...baseHeaders };
+      const response = await this.fetchWithTimeout(url, {
+        method,
+        headers,
+        redirect: 'manual',
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        await response.body?.cancel().catch(() => {});
+        if (useAuth && step === 0) this.checkStatus(response);
+        return '';
+      }
+
+      if (isRedirectStatus(response.status)) {
+        const location = response.headers.get('location');
+        await response.body?.cancel().catch(() => {});
+        if (!location) throw new WebDavError('WebDAV 返回了重定向但没有 Location', 502, 'WEBDAV_BAD_REDIRECT');
+
+        const nextUrl = new URL(location, url).toString();
+        useAuth = useAuth && canForwardWebDavAuth(url, nextUrl);
+        url = nextUrl;
+        continue;
+      }
+
+      const playableStatus = response.ok || response.status === 206;
       await response.body?.cancel().catch(() => {});
-      if (!location) throw new WebDavError('WebDAV 返回了重定向但没有 Location', 502, 'WEBDAV_BAD_REDIRECT');
-      return new URL(location, url).toString();
+      if (!playableStatus) return '';
+
+      if (!useAuth) return url;
+
+      // An authenticated node may itself be a public signed URL. Retry that exact
+      // URL once without Authorization; only return it if a normal browser can
+      // reach it anonymously.
+      useAuth = false;
     }
 
-    await response.body?.cancel().catch(() => {});
-    return '';
+    throw new WebDavError('视频直链重定向次数过多', 502, 'WEBDAV_TOO_MANY_MEDIA_REDIRECTS');
   }
 
   async resolvePlayable(relativePath) {
@@ -250,13 +287,13 @@ class WebDavClient {
 
     if (!directUrl) {
       throw new WebDavError(
-        '这个 WebDAV 需要账号认证，但文件请求没有返回可供浏览器直连的 302 地址。为保证自建服务器不代理视频，TogetherVideo 不会中转该文件。请使用会返回 302/直链的 123 云盘 WebDAV 或无需认证的 WebDAV 播放地址。',
+        '这个 WebDAV 需要账号认证，但文件请求没有返回可供浏览器匿名访问的最终直链。为保证自建服务器不代理视频，TogetherVideo 不会中转该文件。',
         409,
         'WEBDAV_NO_BROWSER_DIRECT_URL',
       );
     }
 
-    return { url: directUrl, strategy: 'webdav-redirect' };
+    return { url: directUrl, strategy: 'webdav-final-direct' };
   }
 }
 
