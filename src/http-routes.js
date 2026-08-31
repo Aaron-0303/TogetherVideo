@@ -2,6 +2,130 @@ const crypto = require('crypto');
 const { WebDavClient, WebDavError } = require('./webdav');
 const { cleanName } = require('./identity');
 
+const MEDIA_BRIDGE_WORKER = `
+const SOURCE_TTL_MS = 90000;
+const sourceCache = new Map();
+
+self.addEventListener('install', function () { self.skipWaiting(); });
+self.addEventListener('activate', function (event) { event.waitUntil(self.clients.claim()); });
+
+function mimeForPath(mediaPath) {
+  const clean = String(mediaPath || '').split('?')[0].toLowerCase();
+  if (clean.endsWith('.mp4')) return 'video/mp4';
+  if (clean.endsWith('.m4v')) return 'video/x-m4v';
+  if (clean.endsWith('.mov')) return 'video/quicktime';
+  if (clean.endsWith('.webm')) return 'video/webm';
+  if (clean.endsWith('.ogv') || clean.endsWith('.ogg')) return 'video/ogg';
+  if (clean.endsWith('.mkv')) return 'video/x-matroska';
+  return 'application/octet-stream';
+}
+
+async function resolveProviderUrl(mediaPath, fresh) {
+  const now = Date.now();
+  const cached = sourceCache.get(mediaPath);
+  if (!fresh && cached && cached.expiresAt > now) return cached.url;
+
+  const resolver = new URL('/api/media/url', self.location.origin);
+  resolver.searchParams.set('path', mediaPath);
+  if (fresh) resolver.searchParams.set('_fresh', String(now));
+
+  const response = await fetch(resolver, {
+    method: 'GET',
+    credentials: 'same-origin',
+    redirect: 'follow',
+    cache: 'no-store',
+    headers: { Accept: 'application/json' },
+  });
+  const data = await response.json().catch(function () { return {}; });
+  if (!response.ok || data.ok === false || !data.url) {
+    throw new Error(data.error || ('media resolver HTTP ' + response.status));
+  }
+
+  sourceCache.set(mediaPath, { url: data.url, expiresAt: now + SOURCE_TTL_MS });
+  return data.url;
+}
+
+function providerHeaders(request) {
+  const headers = new Headers();
+  const range = request.headers.get('range');
+  if (range) headers.set('Range', range);
+  const ifRange = request.headers.get('if-range');
+  if (ifRange) headers.set('If-Range', ifRange);
+  return headers;
+}
+
+async function fetchProvider(request, providerUrl) {
+  return fetch(providerUrl, {
+    method: 'GET',
+    headers: providerHeaders(request),
+    mode: 'cors',
+    credentials: 'omit',
+    redirect: 'follow',
+    cache: 'no-store',
+    signal: request.signal,
+  });
+}
+
+function normalizedMediaResponse(upstream, mediaPath) {
+  const headers = new Headers();
+  ['content-range', 'content-length', 'accept-ranges', 'etag', 'last-modified'].forEach(function (name) {
+    const value = upstream.headers.get(name);
+    if (value) headers.set(name, value);
+  });
+
+  headers.set('Content-Type', mimeForPath(mediaPath));
+  headers.set('Content-Disposition', 'inline');
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Cache-Control', 'private, no-store');
+  headers.set('X-TogetherVideo-Media-Mode', 'mime-bridge');
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: headers,
+  });
+}
+
+async function handleMedia(request, requestUrl) {
+  const mediaPath = requestUrl.searchParams.get('path') || '';
+  if (!mediaPath) return new Response('Missing media path', { status: 400 });
+
+  try {
+    let providerUrl = await resolveProviderUrl(mediaPath, false);
+    let upstream = await fetchProvider(request, providerUrl);
+
+    if (upstream.status === 401 || upstream.status === 403) {
+      if (upstream.body) await upstream.body.cancel().catch(function () {});
+      sourceCache.delete(mediaPath);
+      providerUrl = await resolveProviderUrl(mediaPath, true);
+      upstream = await fetchProvider(request, providerUrl);
+    }
+
+    if (!(upstream.ok || upstream.status === 206)) {
+      if (upstream.body) await upstream.body.cancel().catch(function () {});
+      return new Response('Provider media HTTP ' + upstream.status, {
+        status: upstream.status || 502,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+      });
+    }
+
+    return normalizedMediaResponse(upstream, mediaPath);
+  } catch (error) {
+    return new Response('Browser media bridge failed: ' + error.message, {
+      status: 502,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+    });
+  }
+}
+
+self.addEventListener('fetch', function (event) {
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin || url.pathname !== '/api/media') return;
+  if (event.request.method !== 'GET') return;
+  event.respondWith(handleMedia(event.request, url));
+});
+`;
+
 function registerHttpRoutes(options = {}) {
   const {
     app,
@@ -40,6 +164,16 @@ function registerHttpRoutes(options = {}) {
   }
 
   app.get('/healthz', (_req, res) => res.json({ ok: true, version: appVersion }));
+
+  // 3.2.1 browser-local media compatibility layer. It does not proxy video
+  // through Node: the Service Worker itself fetches the provider CDN, forwards
+  // the browser's exact Range request, and only normalizes MIME/attachment headers.
+  app.get('/sw.js', (_req, res) => {
+    res.type('application/javascript');
+    res.set('Cache-Control', 'no-store');
+    res.set('Service-Worker-Allowed', '/');
+    res.send(MEDIA_BRIDGE_WORKER);
+  });
 
   app.post('/api/login', (req, res) => {
     if (!settings.verifySitePassword(req.body?.password)) {
@@ -128,9 +262,8 @@ function registerHttpRoutes(options = {}) {
     } catch (error) { next(error); }
   });
 
-  // 3.2 resolver: Artplayer asks for the final URL first, then assigns that URL
-  // directly to its native <video>. This intentionally bypasses the old Service
-  // Worker media bridge and lets Safari/Chrome own Range, buffering and seeking.
+  // The browser-local worker calls this resolver when it needs a current signed
+  // provider URL. WebDAV credentials never leave the server.
   app.get('/api/media/url', async (req, res, next) => {
     try {
       const checked = checkedMediaPath(req.query.path);
@@ -146,7 +279,7 @@ function registerHttpRoutes(options = {}) {
     } catch (error) { next(error); }
   });
 
-  // Keep the old redirect endpoint for backwards compatibility and diagnostics.
+  // Fallback redirect for browsers/pages not yet controlled by the worker.
   app.get('/api/media', async (req, res, next) => {
     try {
       const checked = checkedMediaPath(req.query.path);
@@ -154,7 +287,7 @@ function registerHttpRoutes(options = {}) {
       const { destination, strategy } = await resolveBrowserDestination(req, checked.mediaPath);
       res.set('Cache-Control', 'private, no-store');
       res.set('Referrer-Policy', 'no-referrer');
-      res.set('X-TogetherVideo-Media-Mode', 'browser-direct');
+      res.set('X-TogetherVideo-Media-Mode', 'browser-direct-fallback');
       res.set('X-TogetherVideo-Media-Strategy', strategy);
       res.status(307).set('Location', destination.toString()).end();
     } catch (error) { next(error); }
