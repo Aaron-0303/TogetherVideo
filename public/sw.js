@@ -26,41 +26,45 @@ async function resolveProviderUrl(mediaPath, fresh = false) {
   if (!fresh && cached && cached.expiresAt > now) return cached;
 
   // Reuse the existing no-proxy /api/media route. The private marker prevents
-  // this Service Worker from intercepting its own one-byte resolver request.
+  // this Service Worker from intercepting its own resolver request.
   const resolver = new URL('/api/media', self.location.origin);
   resolver.searchParams.set('path', mediaPath);
   resolver.searchParams.set('_swresolve', '1');
   if (fresh) resolver.searchParams.set('_fresh', String(now));
 
-  const response = await fetch(resolver, {
-    method: 'GET',
-    credentials: 'same-origin',
-    redirect: 'follow',
-    cache: 'no-store',
-    headers: { Range: 'bytes=0-0' },
-  });
+  let lastStatus = 0;
+  for (const method of ['HEAD', 'GET']) {
+    const options = {
+      method,
+      credentials: 'same-origin',
+      redirect: 'follow',
+      cache: 'no-store',
+      headers: method === 'GET' ? { Range: 'bytes=0-0' } : {},
+    };
 
-  // The resolver follows TogetherVideo's 307 in this browser, so the final URL
-  // is the provider/CDN URL and at most one media byte is requested from it.
-  if (!(response.ok || response.status === 206) || !response.url) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`media resolver HTTP ${response.status}`);
+    try {
+      const response = await fetch(resolver, options);
+      lastStatus = response.status;
+      const finalUrl = response.url ? new URL(response.url) : null;
+      const reachedProvider = finalUrl && finalUrl.origin !== self.location.origin;
+      const usable = response.ok || response.status === 206;
+      await response.body?.cancel().catch(() => {});
+
+      if (usable && reachedProvider) {
+        const source = {
+          url: finalUrl.toString(),
+          mime: mimeForPath(mediaPath),
+          expiresAt: now + SOURCE_TTL_MS,
+        };
+        sourceCache.set(mediaPath, source);
+        return source;
+      }
+    } catch (error) {
+      if (method === 'GET') throw error;
+    }
   }
 
-  const finalUrl = new URL(response.url);
-  if (finalUrl.origin === self.location.origin) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error('media resolver did not reach provider');
-  }
-
-  await response.body?.cancel().catch(() => {});
-  const source = {
-    url: finalUrl.toString(),
-    mime: mimeForPath(mediaPath),
-    expiresAt: now + SOURCE_TTL_MS,
-  };
-  sourceCache.set(mediaPath, source);
-  return source;
+  throw new Error(`media resolver HTTP ${lastStatus || 0}`);
 }
 
 async function providerFetch(request, source) {
