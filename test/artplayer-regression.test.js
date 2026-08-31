@@ -37,11 +37,11 @@ test('3.2.1 assigns the same-origin logical media URL only after the worker cont
   assert.doesNotMatch(adapterSource, /fetch\(`\/api\/media\/url\?path=/);
 });
 
-test('MIME bridge forwards native Range unchanged and never slices it', () => {
-  assert.match(routesSource, /const range = request\.headers\.get\('range'\)/);
-  assert.match(routesSource, /if \(range\) headers\.set\('Range', range\)/);
-  assert.doesNotMatch(routesSource, /RANGE_CHUNK_BYTES/);
-  assert.doesNotMatch(routesSource, /boundedMediaRange/);
+test('MIME bridge keeps provider reads bounded instead of falling back to whole-file HTTP 200', () => {
+  assert.match(routesSource, /const RANGE_CHUNK_BYTES = 16 \* 1024 \* 1024/);
+  assert.match(routesSource, /function boundedMediaRange\(rawRange\)/);
+  assert.match(routesSource, /if \(!raw\) return 'bytes=0-' \+ String\(RANGE_CHUNK_BYTES - 1\)/);
+  assert.match(routesSource, /headers\.set\('Range', boundedMediaRange\(request\.headers\.get\('range'\)\)\)/);
 });
 
 test('MIME bridge repairs 123 download headers without proxying through Node', () => {
