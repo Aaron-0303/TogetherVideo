@@ -32,3 +32,13 @@ test('rate change keeps the same media version', () => {
   assert.equal(changed.rate, 1.5);
   assert.equal(changed.mediaVersion, selected.mediaVersion);
 });
+
+test('internal smooth-correction rates cannot become authoritative room rates', () => {
+  const room = new WatchRoom();
+  const selected = room.apply('select', { mediaPath: 'movie.mp4' }, 'A');
+  const leakedFast = room.apply('rate', { mediaPath: 'movie.mp4', mediaVersion: selected.mediaVersion, rate: 1.012 }, 'A');
+  const leakedSlow = room.apply('rate', { mediaPath: 'movie.mp4', mediaVersion: selected.mediaVersion, rate: 0.99 }, 'B');
+  assert.equal(leakedFast, null);
+  assert.equal(leakedSlow, null);
+  assert.equal(room.snapshot().rate, 1);
+});
