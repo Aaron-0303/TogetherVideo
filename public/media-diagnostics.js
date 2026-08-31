@@ -32,7 +32,7 @@
 
   function appleHevcHint(media = {}) {
     if (!/\.mp4$|\.m4v$|\.mov$/i.test(media.extension || '')) return '';
-    return '如果这是 HEVC/H.265 MP4，请用 ffprobe 检查 codec_tag_string。Apple Safari 对 hvc1 更友好；若为 hev1，可无损重封装为 hvc1，不需要重新编码。';
+    return '如果 MIME 已经修正但 Safari 仍无法播放 HEVC/H.265 MP4，再用 ffprobe 检查 codec_tag_string；Apple Safari 对 hvc1 更友好。';
   }
 
   async function inspect(path) {
@@ -49,7 +49,7 @@
   function describe(result, mediaErrorCode) {
     const media = result?.media || {};
     const probe = result?.probe || {};
-    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2 使用 Artplayer 控件，但底层仍是浏览器原生 HTMLVideoElement，并直接连接 123 CDN。`];
+    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2.1 使用 Artplayer 控件 + 原生 HTMLVideoElement；浏览器本地 MIME bridge 会保留原始 Range，并把 123 的下载型响应修正为可播放媒体响应。`];
 
     if (!probe.ok) {
       lines.push(`123 媒体节点探测失败${probe.status ? `（HTTP ${probe.status}）` : ''}。`);
@@ -59,7 +59,7 @@
 
     const details = [];
     if (probe.status) details.push(`HTTP ${probe.status}`);
-    if (probe.contentType) details.push(`Content-Type ${probe.contentType}`);
+    if (probe.contentType) details.push(`原始 Content-Type ${probe.contentType}`);
     if (probe.finalHost) details.push(`节点 ${probe.finalHost}`);
     if (probe.contentLength) details.push(`大小 ${(probe.contentLength / 1024 / 1024 / 1024).toFixed(2)} GB`);
     lines.push(`123 原始响应：${details.join(' · ') || '可访问'}。`);
@@ -67,13 +67,17 @@
     if (!probe.rangeSupported) {
       lines.push('没有检测到 Byte Range/206 支持，这会直接影响拖动和连续播放。');
     } else {
-      lines.push('Range/206 可用；Range、连接复用、预读和 seek 现在完全交给 Safari/Chrome 原生媒体栈处理。');
+      lines.push('Range/206 可用；3.2.1 不再做 16 MiB 人工分片，Safari/Chrome 的 Range 内容会原样发送到 123。');
+    }
+
+    if (/application\/octet-stream/i.test(probe.contentType || '')) {
+      lines.push(`原始 octet-stream 会在浏览器本地改写为 ${media.expectedMime || 'video/*'}，同时移除 attachment/nosniff 对原生播放器的影响。`);
     }
 
     if (media.expectedMime) {
       const support = video.canPlayType(media.expectedMime);
       if (!support) lines.push(`浏览器报告不支持 ${media.expectedMime} 容器。`);
-      else lines.push(`浏览器接受 ${media.expectedMime} 容器，但最终是否可播仍取决于内部 H.264/HEVC 音视频轨道。`);
+      else lines.push(`浏览器接受 ${media.expectedMime} 容器；如果兼容层已经工作但仍失败，再检查内部 H.264/HEVC/AAC 轨道。`);
     }
 
     if (!media.mobilePreferred) lines.push('该封装不是移动端优先格式。');
