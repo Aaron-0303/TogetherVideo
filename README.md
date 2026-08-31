@@ -1,32 +1,56 @@
-# TogetherVideo 2.1
+# TogetherVideo 3.0
 
 只供两个人使用的固定房间同步观影网站。
 
-2.1 继续保持最重要的原则：**TogetherVideo 服务器不代理视频数据**。服务器只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频字节仍由 123 云盘/CDN 直接发送到各自浏览器。
+3.0 继续保持最重要的原则：**TogetherVideo 服务器不代理视频数据**。服务器只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频字节仍由 123 云盘/CDN 直接发送到各自浏览器。
 
-## 2.1 新增：双播放器核心
+## 3.0：稳定播放优先
 
-2.1 不再把所有视频兼容性都押在原生 `<video>` 上：
+3.0 不再把“加载、缓冲、恢复、同步”混成一个状态，而是明确拆分：
 
 ```text
-选择视频
-   │
-   ▼
-原生 HTML5 Video
-   │
-   ├─ 能播放 ───────────────→ 继续使用原生播放器
-   │
-   └─ 解码 / 媒体源失败
-          │
-          ▼
-   libmedia AVPlayer
-          │
-          ├─ MP4 自行解封装
-          ├─ WebCodecs / MSE / 硬件解码优先
-          └─ WASM 软件解码兜底
+准备媒体
+  ↓
+首帧就绪
+  ↓
+稳定播放
+  ↓
+检测到卡顿
+  ↓
+共享缓冲保护
+  ↓
+重新可播放
+  ↓
+连续稳定播放 3 秒
+  ↓
+恢复自动对轴
 ```
 
-HEVC 兼容核心使用 `@libmedia/avplayer`。原生播放器失败时自动切换，不需要手动选择播放器。两套播放器共用同一个同步接口，所以播放、暂停、拖动、倍速、自动对轴和“等等我”仍使用原来的服务端权威时间线。
+媒体恢复期间，客户端只保持服务端权威的播放/暂停意图，不进行周期性硬 seek，也不通过临时倍速追赶。只有真实播放连续稳定后，才重新加入自动对轴。
+
+持续卡顿超过约 12 秒会进入有限自动重载，退避间隔为：
+
+```text
+0.5s → 1.5s → 3.5s → 7s → 12s
+```
+
+最多 5 次，之后明确停止，避免无限重载和反复跳动。
+
+## Safari / iPad / iPhone
+
+3.0 对 Apple 移动端采取 **Safari 系统原生媒体管线优先**。
+
+2.1 的 libmedia HEVC fallback 在实际 iPad Safari 测试中出现黑屏和无声，因此 3.0 已明确禁用 Safari 上的这条 fallback。Safari 原生播放失败时会直接给出媒体诊断，不再进入一个看似“兼容播放”但实际上没有画面/声音的状态。
+
+非 Apple 浏览器仍保留 `@libmedia/avplayer` 作为原生播放失败后的可选兼容核心。
+
+跨浏览器最稳妥的片源仍然是：
+
+```text
+MP4 + H.264 / AVC + AAC-LC
+```
+
+HEVC 是否可以原生播放取决于设备、浏览器、MP4 封装与具体 codec 标记。
 
 ## 视频数据链路
 
@@ -44,7 +68,7 @@ TogetherVideo 服务器           │
 
 TogetherVideo 服务器只负责：
 
-- 两个人的在线与缓冲状态
+- 两个人的在线与真实缓冲状态
 - 播放 / 暂停 / 拖动 / 倍速同步
 - 自动对轴
 - “等等我”
@@ -67,29 +91,7 @@ Content-Disposition: attachment
 X-Content-Type-Options: nosniff
 ```
 
-2.1 保留浏览器 Service Worker 本地兼容层。它可以在浏览器本地透传 Range，并把交给原生 `<video>` 的响应修正为正确的视频 MIME 和 `inline`，同时保留 206 / Content-Range。
-
-如果原生播放器仍然因为 HEVC、封装或浏览器媒体管线失败，2.1 会自动切换到 libmedia AVPlayer。AVPlayer 直接通过 Fetch/Range 读取 123 地址并自行解封装，不依赖 123 的视频 MIME。
-
-## HEVC / H.265
-
-2.1 的目标是让 HEVC 文件不必为了网页播放而预先全部转成 H.264。
-
-兼容播放器优先尝试浏览器硬件能力：
-
-- MediaSource / MSE
-- WebCodecs
-- 硬件解码
-
-如果硬件路径不可用，libmedia 可以加载对应 WASM 解码器作为兜底。实际 4K HEVC 软件解码仍受设备 CPU、内存、温度和浏览器限制，因此不能保证所有老旧手机都能流畅软解 4K。
-
-跨所有浏览器最稳妥的格式仍然是：
-
-```text
-MP4 + H.264 / AVC + AAC-LC
-```
-
-但 2.1 会主动尝试兼容 HEVC，而不是一遇到 HEVC 就要求用户转码。
+浏览器 Service Worker 会在本地透传 Range，把交给原生 `<video>` 的响应修正为正确的视频 MIME 和 `inline`，同时保留 206 / Content-Range。视频字节仍然是 123 CDN → 浏览器。
 
 ## 同步功能
 
@@ -100,13 +102,15 @@ MP4 + H.264 / AVC + AAC-LC
 - 0.5× / 0.75× / 1× / 1.25× / 1.5× / 2× 倍速同步
 - 小偏差通过轻微临时倍速平滑追赶
 - 大偏差才硬 seek
-- 缓冲保护：一方持续缓冲时双方暂时暂停
+- 恢复期间冻结 seek / 倍速追赶
+- 一方持续真实缓冲时双方暂时暂停
+- 媒体重新可播放后先恢复房间播放，再连续验证本地播放稳定性
 - “等等我”一键暂停双方
 - Socket.IO 自动重连
 - 重连后恢复媒体、进度、播放状态和倍速
 - 手机端播放器优先布局
 
-服务端保存唯一权威时间线，包括 `media`、`mediaVersion`、`playing`、`position`、`rate`、`anchorAt` 和 `revision`。客户端定期测量 RTT 并与服务端时间线校准；底层播放器换成 HEVC 兼容核心时，同步协议不会改变。
+服务端保存唯一权威时间线，包括 `media`、`mediaVersion`、`playing`、`position`、`rate`、`anchorAt` 和 `revision`。客户端定期测量 RTT 并与服务端时间线校准。
 
 ## WebDAV 设置
 
@@ -125,13 +129,7 @@ WebDAV 地址
 https://webdav.123pan.cn/webdav
 ```
 
-根目录通常可以使用：
-
-```text
-/
-```
-
-先点击 **测试连接**，成功后点击 **保存并使用**。
+根目录通常可以使用 `/`。先点击 **测试连接**，成功后点击 **保存并使用**。
 
 WebDAV 密码保存在服务器 `data/settings.json` 中，设置 API 不会把密码明文返回前端。
 
@@ -143,25 +141,12 @@ WebDAV 密码保存在服务器 `data/settings.json` 中，设置 API 不会把�
 - `data/` 可持久化
 - 生产环境使用 HTTPS
 
-安装：
-
 ```bash
 npm install
-```
-
-启动：
-
-```bash
 npm start
 ```
 
-默认端口：
-
-```text
-3000
-```
-
-自动部署平台提供 `PORT` 时会自动使用该端口。
+默认端口为 `3000`。自动部署平台提供 `PORT` 时会自动使用该端口。
 
 首次默认站点密码：
 
@@ -173,9 +158,7 @@ change-me
 
 ## HTTPS
 
-2.1 强烈要求生产环境通过 HTTPS 访问，因为 Service Worker 和部分现代浏览器媒体能力依赖安全上下文。
-
-推荐：
+3.0 生产环境应通过 HTTPS 访问，因为 Service Worker 和现代浏览器媒体能力依赖安全上下文。
 
 ```text
 浏览器
@@ -194,24 +177,22 @@ TRUST_PROXY=true
 COOKIE_SECURE=true
 ```
 
-TogetherVideo 自身仍可以监听本机 HTTP 端口。
-
 ## 持久化
 
-部署平台需要持久化：
+持续保存：
 
 ```text
 data/
 ```
 
-其中主要包含：
+主要包含：
 
 ```text
 data/settings.json
 data/watch-state.json
 ```
 
-升级 2.0 → 2.1 不需要清空数据目录。
+升级到 3.0 不需要清空数据目录。
 
 ## 开发检查
 
@@ -224,11 +205,13 @@ CI 会检查：
 
 - 服务端和浏览器脚本语法
 - 运行时依赖是否完整
-- libmedia AVPlayer ESM 主文件和动态 chunk 是否实际安装
-- AVPlayer 发布文件是否包含浏览器无法直接解析的裸 `@libmedia/*` import
+- 3.0 媒体恢复状态机
+- Safari 不进入 libmedia fallback
+- 恢复期间冻结自动对轴
+- 自动重载次数上限
 - WebDAV 解析与认证重定向安全规则
 - 单房间和同步状态回归测试
 
 ## 第三方组件
 
-2.1 使用 `@libmedia/avplayer` 作为原生播放失败时的浏览器兼容核心。其许可和归属信息见 `THIRD_PARTY_NOTICES.md`。
+非 Apple 浏览器的可选兼容核心使用 `@libmedia/avplayer`。许可和归属信息见 `THIRD_PARTY_NOTICES.md`。
