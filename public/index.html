@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#0b0d12" />
-  <title>TogetherVideo 2.1</title>
-  <link rel="stylesheet" href="/styles.css?v=2.1.0" />
+  <title>TogetherVideo 3.0</title>
+  <link rel="stylesheet" href="/styles.css?v=3.0.0" />
 </head>
 <body>
   <div id="loginLayer" class="login-layer hidden">
@@ -23,7 +23,7 @@
 
   <div id="app" class="app hidden">
     <header class="topbar">
-      <div class="brand"><span>♥</span><strong>TogetherVideo</strong><small>2.1</small></div>
+      <div class="brand"><span>♥</span><strong>TogetherVideo</strong><small>3.0</small></div>
       <div class="top-actions">
         <span id="socketBadge" class="pill">连接中</span>
         <span id="onlineBadge" class="pill">0 / 2 在线</span>
@@ -56,11 +56,11 @@
 
           <div id="videoShell" class="video-shell">
             <video id="video" controls playsinline webkit-playsinline preload="auto"></video>
-            <div id="libmediaPlayer" class="libmedia-player hidden" aria-label="HEVC 兼容播放器"></div>
+            <div id="libmediaPlayer" class="libmedia-player hidden" aria-label="非 Safari 兼容播放器"></div>
             <div id="emptyPlayer" class="empty-player">
               <span class="play-icon">▶</span>
               <strong>从片库选择视频</strong>
-              <span>原生播放失败时会自动切换 HEVC 兼容播放器；视频仍由浏览器直接读取 123</span>
+              <span>3.0 优先系统原生播放；Safari 不再启用会黑屏/无声的实验兼容核心</span>
             </div>
             <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击继续同步播放</button>
             <div id="compatControls" class="compat-controls hidden">
@@ -69,7 +69,7 @@
               <span id="compatTime" class="compat-time">00:00 / 00:00</span>
               <label class="compat-volume">音量<input id="compatVolume" type="range" min="0" max="1" step="0.05" value="1" /></label>
               <button id="compatFullscreenBtn" class="compat-fullscreen" type="button">全屏</button>
-              <span class="compat-engine">HEVC 兼容</span>
+              <span class="compat-engine">兼容播放</span>
             </div>
           </div>
 
@@ -104,7 +104,7 @@
   <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
     <div class="settings-card">
       <div class="panel-head"><div><p class="eyebrow">SETTINGS</p><h2>WebDAV 设置</h2></div><button id="closeSettingsBtn" class="ghost" type="button">关闭</button></div>
-      <p class="muted">123 云盘请使用“第三方挂载 / WebDAV”生成的应用密码。服务器只解析目录和跳转地址；原生播放器与 HEVC 兼容播放器都直接从 123 获取视频 Range 数据。</p>
+      <p class="muted">123 云盘请使用“第三方挂载 / WebDAV”生成的应用密码。服务器只解析目录和跳转地址；视频 Range 数据仍由浏览器直接读取 123。</p>
       <div class="form-grid">
         <label class="full">WebDAV 地址<input id="webdavUrl" placeholder="https://webdav.123pan.cn/webdav" /></label>
         <label>用户名<input id="webdavUsername" autocomplete="username" placeholder="123 云盘账号 / WebDAV 用户名" /></label>
@@ -119,11 +119,12 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/media-transport.js?v=2.1.0"></script>
-  <script src="/hybrid-media.js?v=2.1.2"></script>
+  <script src="/media-transport.js?v=3.0.0"></script>
+  <script src="/hybrid-media.js?v=3.0.0"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/sync-policy.js?v=2.0.2"></script>
-  <script src="/app.js?v=2.1.1"></script>
-  <script src="/media-diagnostics.js?v=2.1.0"></script>
+  <script src="/sync-policy.js?v=3.0.0"></script>
+  <script src="/media-recovery.js?v=3.0.0"></script>
+  <script src="/app.js?v=3.0.0"></script>
+  <script src="/media-diagnostics.js?v=3.0.0"></script>
 </body>
 </html>
