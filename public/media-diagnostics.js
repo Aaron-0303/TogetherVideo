@@ -2,7 +2,8 @@
   const video = document.getElementById('video');
   const notice = document.getElementById('playerNotice');
   const badge = document.getElementById('syncBadge');
-  if (!video || !notice || !badge) return;
+  const player = window.TogetherMediaPlayer || video;
+  if (!video || !player || !notice || !badge) return;
 
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
@@ -11,7 +12,7 @@
   let diagnosticSeq = 0;
 
   function currentMediaPath() {
-    const raw = video.getAttribute('src') || '';
+    const raw = player.src || video.getAttribute('src') || '';
     try {
       const url = new URL(raw, location.href);
       if (url.pathname !== '/api/media') return '';
@@ -30,7 +31,7 @@
     if (code === MediaError.MEDIA_ERR_NETWORK) return '网络读取失败';
     if (code === MediaError.MEDIA_ERR_DECODE) return '浏览器解码失败';
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) return '媒体源不受支持';
-    return '未知媒体错误';
+    return '播放器错误';
   }
 
   async function inspect(path) {
@@ -48,13 +49,10 @@
     const media = result?.media || {};
     const probe = result?.probe || {};
     const bridge = localBridgeActive();
-    const lines = [`${mediaErrorName(mediaErrorCode)}。`];
-
-    if (!window.MediaTransport?.supported?.()) {
-      lines.push('当前页面无法使用 Service Worker 本地媒体兼容层；移动端请确认网站使用 HTTPS。');
-    } else if (!bridge) {
-      lines.push('Service Worker 本地媒体兼容层当前未接管页面；刷新页面后再试一次。');
-    }
+    const fallback = player.mode === 'libmedia';
+    const lines = [fallback
+      ? 'HEVC 兼容播放器也未能完成播放。'
+      : `${mediaErrorName(mediaErrorCode)}。`];
 
     if (!probe.ok) {
       lines.push(`123 媒体节点探测失败${probe.status ? `（HTTP ${probe.status}）` : ''}。`);
@@ -69,51 +67,61 @@
     lines.push(`123 原始响应：${details.join(' · ') || '可访问'}。`);
 
     if (!probe.rangeSupported) {
-      lines.push('没有检测到 Byte Range/206 支持，移动 Safari 很可能无法稳定播放和拖动。');
+      lines.push('没有检测到 Byte Range/206 支持；原生和兼容播放器都会受到影响。');
     }
 
     const attachment = probe.contentDisposition && /attachment/i.test(probe.contentDisposition);
     const wrongMime = probe.contentType && !/^video\//i.test(probe.contentType);
 
-    if (bridge && (attachment || wrongMime)) {
-      lines.push(`浏览器本地兼容层已经在交给 <video> 前把响应修正为 ${media.expectedMime || 'video/*'} + inline，并保留 206/Content-Range。`);
+    if (fallback) {
+      lines.push('2.1 已绕过原生 <video> 的解封装/解码路径，改由 libmedia 在浏览器内读取 123 Range、解析容器并选择 WebCodecs/硬件或 WASM 解码。');
       if (probe.rangeSupported) {
-        lines.push('如果仍然播放失败，优先怀疑文件内部视频/音频编码，而不是 123 的 attachment/octet-stream 响应头。');
+        lines.push('因此当前失败不再由 123 的 attachment/octet-stream 响应头直接造成；下一步应检查 libmedia 控制台错误、设备解码能力或 4K HEVC 的性能/内存限制。');
       }
+    } else if (bridge && (attachment || wrongMime)) {
+      lines.push(`浏览器本地兼容层已经在交给 <video> 前把响应修正为 ${media.expectedMime || 'video/*'} + inline，并保留 206/Content-Range。`);
+      if (probe.rangeSupported) lines.push('若原生播放失败，2.1 会自动继续尝试 HEVC 兼容播放器。');
     } else {
-      if (attachment) lines.push('原始直链是 attachment 下载响应，移动 Safari 可能拒绝直接作为视频加载。');
+      if (!window.MediaTransport?.supported?.()) {
+        lines.push('当前页面无法使用 Service Worker 本地媒体兼容层；移动端请确认网站使用 HTTPS。');
+      } else if (!bridge) {
+        lines.push('Service Worker 本地媒体兼容层当前未接管页面；刷新页面后再试一次。');
+      }
+      if (attachment) lines.push('原始直链是 attachment 下载响应。');
       if (wrongMime) lines.push(`原始 MIME 不是 video/*（当前为 ${probe.contentType}）。`);
     }
 
     if (media.expectedMime) {
       const support = video.canPlayType(media.expectedMime);
-      if (!support) lines.push(`当前浏览器报告不支持 ${media.expectedMime} 这种容器类型。`);
-      else if (bridge && probe.rangeSupported) lines.push(`当前浏览器支持容器 ${media.expectedMime}；下一层需要检查实际 Codec。`);
+      if (!support) lines.push(`原生浏览器报告不支持 ${media.expectedMime} 容器；2.1 的兼容播放器会自行解封装。`);
+      else lines.push(`原生浏览器支持 ${media.expectedMime} 容器。`);
     }
 
     if (!media.mobilePreferred) lines.push('该封装不是移动端优先格式。');
-    lines.push('跨 iPad Safari、iPhone 和 Android Chrome 最稳妥的是 MP4 + H.264/AVC + AAC-LC。');
+    if (fallback) {
+      lines.push(`兼容核心错误：${player.error?.message || '未提供具体错误信息'}。`);
+    }
     return lines.join(' ');
   }
 
-  video.addEventListener('loadedmetadata', () => { diagnosticSeq += 1; });
+  player.addEventListener('loadedmetadata', () => { diagnosticSeq += 1; });
 
-  video.addEventListener('error', async () => {
+  player.addEventListener('error', async () => {
     const path = currentMediaPath();
     if (!path) return;
     const seq = ++diagnosticSeq;
-    const code = video.error?.code || 0;
+    const code = player.error?.code || 0;
 
     try {
       const result = await inspect(path);
       if (seq !== diagnosticSeq) return;
       notice.textContent = describe(result, code);
       notice.classList.add('error');
-      badge.textContent = '播放失败 · 已诊断';
+      badge.textContent = player.mode === 'libmedia' ? 'HEVC 兼容失败 · 已诊断' : '播放失败 · 已诊断';
       badge.classList.remove('good');
     } catch (error) {
       if (seq !== diagnosticSeq) return;
-      notice.textContent = `${mediaErrorName(code)}。媒体诊断失败：${error.message}。`;
+      notice.textContent = `${player.mode === 'libmedia' ? 'HEVC 兼容播放失败' : mediaErrorName(code)}。媒体诊断失败：${error.message}。`;
       notice.classList.add('error');
     }
   });
