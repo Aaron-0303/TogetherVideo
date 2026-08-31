@@ -1,18 +1,18 @@
 (() => {
-  const player = window.TogetherMediaPlayer;
-  const video = player?.video || document.getElementById('video');
+  const video = document.getElementById('video');
   const notice = document.getElementById('playerNotice');
   const badge = document.getElementById('syncBadge');
+  const player = window.TogetherMediaPlayer || video;
   if (!video || !player || !notice || !badge) return;
 
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
-  video.preload = 'metadata';
+  video.preload = 'auto';
 
   let diagnosticSeq = 0;
 
   function currentMediaPath() {
-    const raw = player.src || '';
+    const raw = player.src || video.getAttribute('src') || '';
     try {
       const url = new URL(raw, location.href);
       if (url.pathname !== '/api/media') return '';
@@ -30,12 +30,7 @@
     return '播放器错误';
   }
 
-  function appleHevcHint(media = {}) {
-    if (!/\.mp4$|\.m4v$|\.mov$/i.test(media.extension || '')) return '';
-    return '如果 MIME 已经修正但 Safari 仍无法播放 HEVC/H.265 MP4，再用 ffprobe 检查 codec_tag_string；Apple Safari 对 hvc1 更友好。';
-  }
-
-  async function inspect(path) {
+  async function inspectServer(path) {
     const response = await fetch(`/api/media/check?path=${encodeURIComponent(path)}`, {
       credentials: 'same-origin',
       cache: 'no-store',
@@ -46,43 +41,74 @@
     return data;
   }
 
-  function describe(result, mediaErrorCode) {
-    const media = result?.media || {};
-    const probe = result?.probe || {};
-    const lines = [`${mediaErrorName(mediaErrorCode)}。当前使用 Artplayer 控件 + 原生 HTMLVideoElement；浏览器本地 MIME bridge 会修正 123 的下载型响应，并恢复 3.1.2 的 16 MiB 有界 Range 读取，避免首包退化成整个大文件的 HTTP 200。`];
-
-    if (!probe.ok) {
-      lines.push(`123 媒体节点探测失败${probe.status ? `（HTTP ${probe.status}）` : ''}。`);
-      if (probe.error === 'timeout') lines.push('下载节点响应超时。');
-      return lines.join(' ');
+  async function inspectBrowserBridge(path) {
+    if (window.MediaTransport?.mode?.() !== 'service-worker') {
+      return { active: false, error: 'Service Worker 未接管当前页面' };
     }
+    try {
+      const response = await fetch(`/api/media?path=${encodeURIComponent(path)}&_diag=${Date.now()}`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Range: 'bytes=0-0' },
+      });
+      const result = {
+        active: true,
+        status: response.status,
+        contentType: response.headers.get('content-type') || '',
+        contentRange: response.headers.get('content-range') || '',
+        contentLength: response.headers.get('content-length') || '',
+        mode: response.headers.get('x-togethervideo-media-mode') || '',
+      };
+      await response.body?.cancel().catch(() => {});
+      return result;
+    } catch (error) {
+      return { active: true, status: 0, error: error.message || String(error) };
+    }
+  }
 
-    const details = [];
-    if (probe.status) details.push(`HTTP ${probe.status}`);
-    if (probe.contentType) details.push(`原始 Content-Type ${probe.contentType}`);
-    if (probe.finalHost) details.push(`节点 ${probe.finalHost}`);
-    if (probe.contentLength) details.push(`大小 ${(probe.contentLength / 1024 / 1024 / 1024).toFixed(2)} GB`);
-    lines.push(`123 原始响应：${details.join(' · ') || '可访问'}。`);
+  function describe(serverResult, bridge, mediaErrorCode) {
+    const media = serverResult?.media || {};
+    const probe = serverResult?.probe || {};
+    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2.2 已恢复 3.1.2 的稳定原生媒体管线。`];
 
-    if (!probe.rangeSupported) {
-      lines.push('没有检测到 Byte Range 支持，这会直接影响拖动和连续播放。');
+    const serverBits = [];
+    if (probe.headStatus) serverBits.push(`HEAD ${probe.headStatus}`);
+    if (probe.rangeStatus) serverBits.push(`Range GET ${probe.rangeStatus}`);
+    if (probe.contentRange) serverBits.push(`Content-Range ${probe.contentRange}`);
+    if (probe.contentType) serverBits.push(`原始 MIME ${probe.contentType}`);
+    if (probe.finalHost) serverBits.push(`节点 ${probe.finalHost}`);
+    lines.push(`123 服务端实测：${serverBits.join(' · ') || '无有效结果'}。`);
+
+    if (probe.rangeVerified) {
+      lines.push('已真实验证 CDN 返回 HTTP 206 + Content-Range，不再用 HEAD 200 推断 Range 能力。');
     } else {
-      lines.push('服务端支持 Byte Range；浏览器媒体请求会按 16 MiB 窗口读取，保留请求起点并避免一次请求整个剩余文件。');
+      lines.push('关键异常：没有真实拿到 206 + Content-Range。123 即使声明 Accept-Ranges，也不能视为实际 Range 可用。');
     }
 
-    if (/application\/octet-stream/i.test(probe.contentType || '')) {
-      lines.push(`原始 octet-stream 会在浏览器本地改写为 ${media.expectedMime || 'video/*'}，同时移除 attachment/nosniff 对原生播放器的影响。`);
+    if (!bridge.active) {
+      lines.push(`浏览器媒体桥未生效：${bridge.error || '未知原因'}。请确认 HTTPS 并强制刷新页面。`);
+    } else if (bridge.status) {
+      lines.push(`浏览器桥接实测：HTTP ${bridge.status}${bridge.contentRange ? ` · ${bridge.contentRange}` : ''}${bridge.contentType ? ` · ${bridge.contentType}` : ''}。`);
+      if (bridge.status !== 206 || !/^bytes\s/i.test(bridge.contentRange || '')) {
+        lines.push('浏览器实际播放链路没有得到标准 206 Range；此时不要先怀疑视频编码。');
+      } else if (!/^video\//i.test(bridge.contentType || '')) {
+        lines.push('Range 正常，但桥接后的 MIME 仍不是 video/*，属于媒体桥响应头问题。');
+      } else {
+        lines.push('浏览器实际链路已经得到标准 206 和 video/*；若仍失败，才继续检查 MP4 内部封装与 Codec。');
+      }
+    } else {
+      lines.push(`浏览器桥接自测失败：${bridge.error || '未知错误'}。`);
     }
 
     if (media.expectedMime) {
       const support = video.canPlayType(media.expectedMime);
-      if (!support) lines.push(`浏览器报告不支持 ${media.expectedMime} 容器。`);
-      else lines.push(`浏览器接受 ${media.expectedMime} 容器；如果有界 Range 和 MIME bridge 均已工作但仍失败，再检查内部 H.264/HEVC/AAC 轨道。`);
+      lines.push(support ? `浏览器声明可接受 ${media.expectedMime} 容器。` : `浏览器声明不接受 ${media.expectedMime} 容器。`);
     }
 
-    if (!media.mobilePreferred) lines.push('该封装不是移动端优先格式。');
-    const hint = appleHevcHint(media);
-    if (hint) lines.push(hint);
+    if (/\.mp4$|\.m4v$|\.mov$/i.test(media.extension || '')) {
+      lines.push('只有在浏览器桥接自测为 206 + video/mp4 后仍失败，才需要继续检查 H.264/HEVC/AAC、moov atom 和 HEVC hvc1/hev1。');
+    }
     return lines.join(' ');
   }
 
@@ -95,11 +121,11 @@
     const code = player.error?.code || 0;
 
     try {
-      const result = await inspect(path);
+      const [serverResult, bridge] = await Promise.all([inspectServer(path), inspectBrowserBridge(path)]);
       if (seq !== diagnosticSeq) return;
-      notice.textContent = describe(result, code);
+      notice.textContent = describe(serverResult, bridge, code);
       notice.classList.add('error');
-      badge.textContent = '播放失败 · 已诊断';
+      badge.textContent = player.mode === 'libmedia' ? '兼容播放失败 · 已诊断' : '播放失败 · 已诊断';
       badge.classList.remove('good');
     } catch (error) {
       if (seq !== diagnosticSeq) return;
