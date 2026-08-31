@@ -10,7 +10,8 @@ const app = fs.readFileSync(path.join(root, 'public', 'app-3.1.js'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 
 test('browser media bootstrap always resolves a fresh provider URL', () => {
-  assert.match(routes, /resolvePlayable\(checked\.mediaPath, \{ fresh: true \}\)/);
+  assert.match(routes, /app\.get\('\/api\/media\/url'/);
+  assert.match(routes, /resolvePlayable\(mediaPath, \{ fresh: true \}\)/);
 });
 
 test('late join autoplay rejection falls back to visible muted playback', () => {
@@ -26,7 +27,7 @@ test('sound unlock happens directly inside a user gesture', () => {
   assert.match(unlock, /\}, true\);/);
 });
 
-test('unlock shim loads after 3.1 app creates TogetherMediaPlayer', () => {
+test('unlock shim loads after the room app creates TogetherMediaPlayer', () => {
   const appAt = index.indexOf('/app-3.1.js');
   const unlockAt = index.indexOf('/playback-unlock.js');
   assert.ok(appAt >= 0);
