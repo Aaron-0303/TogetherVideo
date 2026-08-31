@@ -20,34 +20,12 @@ test('all server runtime dependencies are declared and resolvable', () => {
   }
 });
 
-test('2.1 HEVC fallback dependency ships browser ESM assets', () => {
+test('3.2 Artplayer browser distribution is installed locally', () => {
   const pkg = require('../package.json');
-  assert.ok(pkg.dependencies?.['@libmedia/avplayer'], '@libmedia/avplayer must be declared in dependencies');
+  assert.equal(pkg.dependencies?.artplayer, '5.4.0');
 
-  const esmDir = path.join(
-    process.cwd(),
-    'node_modules',
-    '@libmedia',
-    'avplayer',
-    'dist',
-    'esm',
-  );
-  const entry = path.join(esmDir, 'avplayer.js');
-  assert.ok(fs.existsSync(entry), 'libmedia AVPlayer ESM entry must exist after npm install');
-
-  const files = fs.readdirSync(esmDir).filter((name) => name.endsWith('.js'));
-  const chunks = files.filter((name) => /^\d+\.avplayer\.js$/.test(name));
-  assert.ok(chunks.length > 0, 'libmedia dynamic AVPlayer chunks must be installed beside avplayer.js');
-
-  // TogetherVideo serves this prebuilt ESM directory directly to browsers. A
-  // bare npm specifier such as @libmedia/avutil would require an import map or a
-  // bundler, neither of which is part of the zero-build deployment model.
-  for (const name of files) {
-    const source = fs.readFileSync(path.join(esmDir, name), 'utf8');
-    assert.doesNotMatch(
-      source,
-      /(?:\bfrom\s*|\bimport\s*\()\s*['"]@libmedia\//,
-      `${name} must not contain bare @libmedia imports`,
-    );
-  }
+  const distDir = path.join(process.cwd(), 'node_modules', 'artplayer', 'dist');
+  const entry = path.join(distDir, 'artplayer.js');
+  assert.ok(fs.existsSync(entry), 'Artplayer browser entry must exist after npm install');
+  assert.ok(fs.statSync(entry).size > 10_000, 'Artplayer browser entry should not be an empty stub');
 });
