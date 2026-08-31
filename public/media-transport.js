@@ -47,8 +47,9 @@
 
     readyPromise = (async () => {
       try {
-        // Keep registration options deliberately minimal for older iPadOS/WebKit.
-        const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+        // Version the worker URL as well as the page scripts so a deployment does
+        // not leave one viewer streaming through an older open-ended Range policy.
+        const registration = await navigator.serviceWorker.register('/sw.js?v=3.1.2', { scope: '/' });
         registration.update().catch(() => {});
         await navigator.serviceWorker.ready;
         const controlled = await waitForController();
