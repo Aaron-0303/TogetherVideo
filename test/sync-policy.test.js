@@ -54,3 +54,19 @@ test('buffer recovery suppresses correction before grace period expires', () => 
   assert.equal(early.action, 'observe');
   assert.equal(early.rate, 1);
 });
+
+test('buffering viewer holds position when the room pauses', () => {
+  const sync = new Reconciler();
+  sync.setBuffering(true, 1000);
+  const paused = sync.decide({
+    drift: -3.2,
+    desiredRate: 1,
+    playing: false,
+    buffering: true,
+    sampled: false,
+    reason: 'wait',
+    now: 2000,
+  });
+  assert.equal(paused.action, 'hold');
+  assert.equal(paused.rate, 1);
+});
