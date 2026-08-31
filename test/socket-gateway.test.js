@@ -83,7 +83,7 @@ test('socket gateway turns play and seek into two-viewer readiness barriers', ()
   coordinator.stop();
 });
 
-test('second viewer joining a running room pauses it into a join barrier', () => {
+test('second viewer joining a running room pauses it into one broadcast join barrier', () => {
   const io = new FakeIo();
   const room = new WatchRoom();
   const coordinator = new RoomCoordinator({ io, room, maxParticipants: 2 });
@@ -106,7 +106,10 @@ test('second viewer joining a running room pauses it into a join barrier', () =>
   assert.equal(room.snapshot().playing, false);
   assert.equal(room.snapshot().reason, 'barrier-join');
   assert.equal(coordinator.barrier?.reason, 'join');
-  assert.ok(b.sent.some((item) => item.event === 'room:barrier' && item.payload?.reason === 'join'));
+
+  const joinBroadcasts = io.events.filter((item) => item.event === 'room:barrier' && item.payload?.reason === 'join');
+  assert.equal(joinBroadcasts.length, 1);
+  assert.equal(b.sent.some((item) => item.event === 'room:barrier' && item.payload?.reason === 'join'), false);
   coordinator.stop();
 });
 
