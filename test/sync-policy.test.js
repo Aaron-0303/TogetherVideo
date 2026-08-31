@@ -8,95 +8,109 @@ test('RTT estimator ignores one large queueing spike', () => {
   assert.ok(sync.halfRttMs() >= 29 && sync.halfRttMs() <= 33);
 });
 
-test('sub-550ms drift stays in the dead band', () => {
+test('small drift stays untouched for viewing comfort', () => {
   const sync = new Reconciler();
-  const result = sync.decide({ drift: -0.5, desiredRate: 1, playing: true, sampled: true });
+  const result = sync.decide({ drift: -0.55, desiredRate: 1, playing: true, sampled: true, now: 1000 });
   assert.equal(result.action, 'normal');
   assert.equal(result.rate, 1);
+  assert.equal(result.reason, 'within-comfort-zone');
 });
 
-test('soft correction needs three persistent samples and remains subtle', () => {
+test('moderate sub-threshold drift is observed without changing playback rate', () => {
   const sync = new Reconciler();
-  assert.equal(sync.decide({ drift: -0.9, desiredRate: 1, playing: true, sampled: true }).action, 'observe');
-  assert.equal(sync.decide({ drift: -0.95, desiredRate: 1, playing: true, sampled: true }).action, 'observe');
-  const third = sync.decide({ drift: -1.0, desiredRate: 1, playing: true, sampled: true });
+  for (let i = 0; i < 5; i += 1) {
+    const result = sync.decide({ drift: -1.1, desiredRate: 1, playing: true, sampled: true, now: 1000 + i * 1000 });
+    assert.equal(result.action, 'normal');
+    assert.equal(result.rate, 1);
+  }
+});
+
+test('soft correction starts only after three persistent samples', () => {
+  const sync = new Reconciler();
+  const first = sync.decide({ drift: -1.6, desiredRate: 1, playing: true, sampled: true, now: 1000 });
+  const second = sync.decide({ drift: -1.7, desiredRate: 1, playing: true, sampled: true, now: 2000 });
+  const third = sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 3000 });
+  assert.equal(first.action, 'observe');
+  assert.equal(second.action, 'observe');
   assert.equal(third.action, 'rate');
-  assert.ok(third.rate > 1.005 && third.rate <= 1.015);
+  assert.ok(third.rate > 1.01 && third.rate <= 1.03);
 });
 
-test('active soft correction keeps one steady playback rate instead of retuning every sample', () => {
+test('active correction keeps one steady subtle rate instead of retuning every sample', () => {
   const sync = new Reconciler();
-  sync.decide({ drift: -0.9, desiredRate: 1, playing: true, sampled: true });
-  sync.decide({ drift: -0.9, desiredRate: 1, playing: true, sampled: true });
-  const started = sync.decide({ drift: -0.9, desiredRate: 1, playing: true, sampled: true });
-  const later = sync.decide({ drift: -0.72, desiredRate: 1, playing: true, sampled: true });
-  const almostSettled = sync.decide({ drift: -0.31, desiredRate: 1, playing: true, sampled: true });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 1000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 2000 });
+  const started = sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 3000 });
+  const later = sync.decide({ drift: -1.25, desiredRate: 1, playing: true, sampled: true, now: 4000 });
+  const closer = sync.decide({ drift: -0.7, desiredRate: 1, playing: true, sampled: true, now: 5000 });
   assert.equal(started.action, 'rate');
   assert.equal(later.action, 'rate');
-  assert.equal(almostSettled.action, 'rate');
+  assert.equal(closer.action, 'rate');
   assert.equal(later.rate, started.rate);
-  assert.equal(almostSettled.rate, started.rate);
+  assert.equal(closer.rate, started.rate);
+  assert.ok(Math.abs(started.rate - 1) <= 0.03);
 });
 
-test('positive and negative drift corrections are symmetric and capped at 1.5 percent', () => {
-  const behind = new Reconciler();
-  behind.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
-  behind.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
-  const speedUp = behind.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
-
-  const ahead = new Reconciler();
-  ahead.decide({ drift: 1, desiredRate: 1, playing: true, sampled: true });
-  ahead.decide({ drift: 1, desiredRate: 1, playing: true, sampled: true });
-  const slowDown = ahead.decide({ drift: 1, desiredRate: 1, playing: true, sampled: true });
-
-  assert.equal(speedUp.action, 'rate');
-  assert.equal(slowDown.action, 'rate');
-  assert.ok(Math.abs((speedUp.rate - 1) - (1 - slowDown.rate)) < 1e-9);
-  assert.ok(speedUp.rate <= 1.015);
-  assert.ok(slowDown.rate >= 0.985);
-});
-
-test('active correction continues below soft threshold until settled', () => {
-  const sync = new Reconciler();
-  sync.decide({ drift: -0.8, desiredRate: 1, playing: true, sampled: true });
-  sync.decide({ drift: -0.8, desiredRate: 1, playing: true, sampled: true });
-  sync.decide({ drift: -0.8, desiredRate: 1, playing: true, sampled: true });
-  const stillCorrecting = sync.decide({ drift: -0.3, desiredRate: 1, playing: true, sampled: true });
-  assert.equal(stillCorrecting.action, 'rate');
-  const settled = sync.decide({ drift: -0.18, desiredRate: 1, playing: true, sampled: true });
+test('correction ends once robust drift is settled', () => {
+  const sync = new Reconciler({ driftWindow: 3 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 1000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 2000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 3000 });
+  sync.decide({ drift: -0.2, desiredRate: 1, playing: true, sampled: true, now: 4000 });
+  sync.decide({ drift: -0.15, desiredRate: 1, playing: true, sampled: true, now: 5000 });
+  const settled = sync.decide({ drift: -0.1, desiredRate: 1, playing: true, sampled: true, now: 6000 });
   assert.equal(settled.action, 'normal');
   assert.equal(settled.rate, 1);
 });
 
 test('a direction flip stops active correction instead of oscillating', () => {
-  const sync = new Reconciler();
-  sync.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
-  sync.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
-  sync.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
-  const flipped = sync.decide({ drift: 0.3, desiredRate: 1, playing: true, sampled: true });
-  assert.equal(flipped.action, 'normal');
-  assert.equal(flipped.rate, 1);
+  const sync = new Reconciler({ driftWindow: 3 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 1000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 2000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 3000 });
+  sync.decide({ drift: 0.8, desiredRate: 1, playing: true, sampled: true, now: 4000 });
+  const flipped = sync.decide({ drift: 0.8, desiredRate: 1, playing: true, sampled: true, now: 5000 });
+  assert.notEqual(flipped.action, 'rate');
 });
 
-test('multi-second drift is hard-corrected after two confirmations', () => {
+test('major desync seeks only after two persistent 4s samples', () => {
   const sync = new Reconciler();
-  const now = 100000;
-  const first = sync.decide({ drift: -1.6, desiredRate: 1, playing: true, sampled: true, now });
-  assert.equal(first.action, 'observe');
-  const seek = sync.decide({ drift: -1.7, desiredRate: 1, playing: true, sampled: true, now: now + 1000 });
-  assert.equal(seek.action, 'seek');
+  const first = sync.decide({ drift: -4.4, desiredRate: 1, playing: true, sampled: true, now: 100000 });
+  const second = sync.decide({ drift: -4.5, desiredRate: 1, playing: true, sampled: true, now: 101000 });
+  assert.notEqual(first.action, 'seek');
+  assert.equal(second.action, 'seek');
+  assert.equal(second.reason, 'major-desync');
+});
 
-  const duringCooldown1 = sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: now + 2000 });
-  const duringCooldown2 = sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: now + 3000 });
-  assert.equal(duringCooldown1.action, 'observe');
-  assert.equal(duringCooldown2.action, 'observe');
+test('rapidly growing drift is treated as abnormal rate state, not chased with more speed', () => {
+  const sync = new Reconciler();
+  const samples = [-1.0, -1.2, -1.4, -1.7];
+  let result;
+  samples.forEach((drift, index) => {
+    result = sync.decide({ drift, desiredRate: 1, playing: true, sampled: true, now: 100000 + index * 1000 });
+  });
+  assert.equal(result.action, 'seek');
+  assert.equal(result.reason, 'runaway');
+  assert.ok(result.growthPerSecond >= 0.08);
+});
+
+test('soft correction has a maximum duration and returns to normal rate', () => {
+  const sync = new Reconciler({ maxCorrectionDurationMs: 3000, correctionCooldownMs: 5000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 1000 });
+  sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 2000 });
+  const started = sync.decide({ drift: -1.8, desiredRate: 1, playing: true, sampled: true, now: 3000 });
+  const timeout = sync.decide({ drift: -1.6, desiredRate: 1, playing: true, sampled: true, now: 6001 });
+  assert.equal(started.action, 'rate');
+  assert.equal(timeout.action, 'normal');
+  assert.equal(timeout.rate, 1);
+  assert.equal(timeout.reason, 'correction-timeout');
 });
 
 test('buffer recovery suppresses correction before grace period expires', () => {
   const sync = new Reconciler();
   sync.setBuffering(true, 1000);
   sync.setBuffering(false, 2000);
-  const early = sync.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true, now: 4000 });
+  const early = sync.decide({ drift: -2, desiredRate: 1, playing: true, sampled: true, now: 5000 });
   assert.equal(early.action, 'observe');
   assert.equal(early.rate, 1);
 });
@@ -115,4 +129,11 @@ test('buffering viewer holds position when the room pauses', () => {
   });
   assert.equal(paused.action, 'hold');
   assert.equal(paused.rate, 1);
+});
+
+test('manual sync is always allowed to seek precisely', () => {
+  const sync = new Reconciler();
+  const result = sync.decide({ drift: -0.9, desiredRate: 1, playing: true, sampled: true, force: true, now: 1000 });
+  assert.equal(result.action, 'seek');
+  assert.equal(result.reason, 'manual');
 });
