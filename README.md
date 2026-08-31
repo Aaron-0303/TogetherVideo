@@ -1,86 +1,175 @@
-# TogetherVideo 3.0.4
+# TogetherVideo 3.1
 
 只供两个人使用的固定房间同步观影网站。
 
-3.0.x 继续保持最重要的原则：**TogetherVideo 服务器不代理视频数据**。服务器只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频字节仍由 123 云盘/CDN 直接发送到各自浏览器。
+最重要的原则没有改变：**TogetherVideo 服务器不代理、缓存或转码视频正文。** 服务端只负责 WebDAV 元数据、临时播放地址发现和双人同步；真正的视频 Range 数据仍然由 123 云盘/CDN 直接发送到每一个浏览器。
 
-## 3.0.4：后端结构整理
+## 3.1：同步屏障，而不是不停追着对轴
 
-3.0.4 不改变播放、同步和媒体传输行为，主要把原来集中在 `server.js` 里的职责拆开，避免后续继续堆条件分支。
+3.1 重写了播放同步核心。之前 3.0.x 会在播放过程中根据偏差进行临时倍速修正和硬 seek，这在浏览器、Safari、远程 4K Range 视频上容易产生“一个人在加速”“一直跳转”“后加入黑屏”等连锁问题。
+
+3.1 不再把两个正在播放的浏览器不停拉回同一时间点，而是采用更简单的 **Barrier / 同步屏障** 模型：
+
+```text
+正常播放
+   │
+   ├─ 拖动进度
+   ├─ 第二个人加入正在播放的房间
+   ├─ 持续缓冲
+   └─ 连续多次检测到严重不同步
+           ↓
+        暂停双方
+           ↓
+       统一目标位置
+           ↓
+   A 跳转并缓存   B 跳转并缓存
+       ↓ ready       ↓ ready
+           \         /
+            双方 ready
+                ↓
+       server startAt + 约 900ms
+                ↓
+          两边同时 play()
+                ↓
+             正常播放
+```
+
+### 拖动进度条
+
+任何一端拖动完成后，不再让另一端一边播放一边追赶：
+
+```text
+A 拖到 30:00
+    ↓
+A 立即暂停
+    ↓
+服务器把房间暂停在 30:00
+    ↓
+A / B 都跳到 30:00
+    ↓
+双方都确认目标位置已有可播放数据
+    ↓
+服务器预约一个未来 startAt
+    ↓
+双方同时继续播放
+```
+
+浏览器的 `seeked` 本身不等于“已经可以顺畅播放”。3.1 的 ready 判断还会检查目标位置和本地可播放数据，优先要求至少约 1 秒的后续缓存或 `HAVE_FUTURE_DATA`。为了避免少数浏览器在暂停状态下永远不给出更高 readyState，等待较长时间后允许在已有当前帧数据时继续。
+
+### 后进入房间的人
+
+如果 A 已经播放了一段时间，B 后进入：
+
+```text
+B 上线
+  ↓
+服务器记录当前权威位置
+  ↓
+暂停 A
+  ↓
+A 与 B 都准备这个位置
+  ↓
+双方 ready
+  ↓
+一起重新开始
+```
+
+因此 3.1 宁可让先进入的人暂停几秒等待对方，也不允许后进入的人在后台连续 seek、倍速追赶或一直黑屏。
+
+### 正常播放期间
+
+正常播放期间 **不再进行临时倍速校准**。
+
+```text
+0.97x / 1.02x / 1.03x 之类的内部追赶速度：已删除
+```
+
+客户端约每 5 秒只做一次低频检查，不主动改变 `playbackRate`，也不会因为几百毫秒的小偏差 seek。如果连续多次检测到约 2.5 秒以上的严重偏差，才重新进入一次同步屏障：暂停 → 双方准备 → 同时开始。
+
+这意味着正常情况下两个播放器始终按照用户选择的真实倍速运行，例如 `1.0x` 就一直是 `1.0x`。
+
+### 缓冲
+
+两个人都在线并正常播放时，如果一端持续缓冲，服务器不会让另一端一直向前跑，也不会让卡顿端靠加速追回：
+
+```text
+持续缓冲
+  ↓
+进入 barrier
+  ↓
+双方暂停
+  ↓
+重新准备同一位置
+  ↓
+双方 ready 后同时继续
+```
+
+## 当前后端结构
 
 ```text
 server.js
   ├─ 启动 / Session / 静态资源 / 生命周期
   ├─ http-routes.js       HTTP API
   ├─ socket-gateway.js    Socket.IO 事件入口
-  ├─ room-coordinator.js  在线成员与共享缓冲协调
+  ├─ room-coordinator.js  双人 barrier / ready / 定时启动
   ├─ watch-room.js        唯一权威播放时间线
-  ├─ media-service.js     片库、直链缓存与媒体探测
+  ├─ media-service.js     片库、直链解析与媒体探测
   ├─ webdav.js            WebDAV 协议与认证重定向
   └─ settings.js          设置与持久化
 ```
 
-`server.js` 只负责组装模块，不再直接维护 participants、buffering timer、playable cache 或具体 API/Socket 业务。`WatchRoom`、`RoomCoordinator`、`MediaService` 三个状态/服务边界相互独立，修改同步算法时不应顺带修改 WebDAV，修改媒体直链时也不应修改房间时间线。
+`WatchRoom` 只保存权威媒体、位置、倍速和时间线；`RoomCoordinator` 负责两个人是否 ready 以及何时一起开始；媒体/WebDAV 逻辑不参与同步状态机。
 
-CI 额外包含后端结构守卫和 `RoomCoordinator` 行为测试，防止以后把房间、媒体和路由逻辑重新堆回 `server.js`。
-
-## 3.0：稳定播放优先
-
-3.0 不再把“加载、缓冲、恢复、同步”混成一个状态，而是明确拆分：
+## 视频数据链路
 
 ```text
-准备媒体
-  ↓
-首帧就绪
-  ↓
-稳定播放
-  ↓
-检测到卡顿
-  ↓
-共享缓冲保护
-  ↓
-重新可播放
-  ↓
-连续稳定播放 3 秒
-  ↓
-恢复自动对轴
+浏览器 A ───────────────→ 123 WebDAV / CDN
+   │                           ↑
+   │ Socket.IO                 │ 视频 Range 数据
+   ↓                           │
+TogetherVideo 服务器           │
+   ↑                           │
+   │ Socket.IO                 │
+   │                           │
+浏览器 B ───────────────→ 123 WebDAV / CDN
 ```
 
-媒体恢复期间，客户端只保持服务端权威的播放/暂停意图，不进行周期性硬 seek，也不通过临时倍速追赶。只有真实播放连续稳定后，才重新加入自动对轴。
+服务端只负责：
 
-持续卡顿超过约 12 秒会进入有限自动重载，退避间隔为：
+- 唯一房间和最多两个人在线
+- 当前视频、暂停位置、正式倍速
+- barrier / ready / 同步开始时间
+- WebDAV 目录浏览
+- 使用 WebDAV 凭据发现浏览器可直接访问的临时 CDN 地址
+- “等等我”和手动重新同步
 
-```text
-0.5s → 1.5s → 3.5s → 7s → 12s
-```
+**服务器不会 pipe 视频、不会转发视频 Range、不会缓存视频、不会实时转码。**
 
-最多 5 次，之后明确停止，避免无限重载和反复跳动。
+每个浏览器建立媒体连接时都会独立解析自己的临时播放地址，避免两个设备强制共享同一条临时签名 URL。
 
 ## Safari / iPad / iPhone
 
-3.0 对 Apple 移动端采取 **Safari 系统原生媒体管线优先**。
+Apple 移动端始终优先使用 Safari 系统原生媒体管线。之前尝试过的 libmedia Safari fallback 在实际设备上出现过黑屏/无声，因此 Apple 移动端不会进入该 fallback。
 
-2.1 的 libmedia HEVC fallback 在实际 iPad Safari 测试中出现黑屏和无声，因此 3.0 已明确禁用 Safari 上的这条 fallback。Safari 原生播放失败时会直接给出媒体诊断，不再进入一个看似“兼容播放”但实际上没有画面/声音的状态。
-
-非 Apple 浏览器仍保留 `@libmedia/avplayer` 作为原生播放失败后的可选兼容核心。
-
-跨浏览器最稳妥的片源仍然是：
+后加入用户还可能遇到浏览器的自动播放限制：浏览器允许页面加载视频，却拒绝“没有用户手势的带声音自动播放”。遇到这种情况，TogetherVideo 会优先让视频静音启动，保持解码与 Range 下载正常，然后显示：
 
 ```text
-MP4 + H.264 / AVC + AAC-LC
+点击开启声音并加入同步播放
 ```
 
-HEVC 是否可以原生播放取决于设备、浏览器、MP4 封装与具体 codec 标记。
+点击一次即可解除静音。
 
-## 视频需要什么格式才能播放
+---
 
-TogetherVideo 不会在服务器上实时转码，因此 **视频最终能不能播放，取决于浏览器本身是否支持该文件的容器、视频编码、音频编码和封装方式**。
+# 视频需要什么格式才能播放
 
-如果片源来源复杂、以后可能出现 H.264、HEVC、AV1、VP9、MKV 等各种格式，建议统一按下面的规则处理。
+TogetherVideo 不会在服务器上实时转码，所以最终能否播放取决于 **容器 + 视频编码 + 视频位深/像素格式 + 音频编码 + 浏览器/设备**。
 
-### 推荐的通用兼容格式
+以后片源可能来自各种地方，建议统一按照下面的规则处理。
 
-为了尽量同时兼容 iPad / iPhone Safari、Android Chrome、Windows Chrome 等设备，推荐把需要转换的片源统一做成：
+## 最稳妥的通用格式
+
+为了尽量同时兼容 iPad / iPhone Safari、Android Chrome、Windows Chrome：
 
 ```text
 容器：MP4
@@ -89,7 +178,6 @@ Profile：Main 或 High
 位深：8-bit
 像素格式：yuv420p
 音频：AAC-LC
-声道：Stereo / 2.0 优先
 Fast Start：开启
 ```
 
@@ -99,13 +187,9 @@ Fast Start：开启
 MP4 + H.264 8-bit yuv420p + AAC-LC + faststart
 ```
 
-这是 TogetherVideo 的 **最稳妥兼容目标格式**。
+如果不想研究一个新视频到底是什么奇怪编码，转换到这个目标格式最省事。
 
-### HEVC / H.265 的特殊情况
-
-HEVC 并不是一定不能播放。Apple 设备可以原生播放很多 HEVC 文件，但 MP4 内部的 HEVC sample entry 很重要。
-
-先检查：
+## 先用 ffprobe 检查
 
 ```powershell
 ffprobe -v error -select_streams v:0 `
@@ -114,23 +198,42 @@ ffprobe -v error -select_streams v:0 `
   "input.mp4"
 ```
 
-如果看到：
+也可以直接：
+
+```powershell
+ffprobe -hide_banner "input.mp4"
+```
+
+重点看：
+
+```text
+Video: h264 / hevc / av1 / vp9 ...
+codec_tag_string=hvc1 / hev1 ...
+pix_fmt=yuv420p / yuv420p10le / yuv422p ...
+Audio: aac / ac3 / eac3 / dts / truehd ...
+```
+
+## HEVC / H.265
+
+HEVC 并不是一定不能播放。Apple 设备可以原生播放很多 HEVC，但 MP4 中的 sample entry 很重要。
+
+如果是：
 
 ```text
 codec_name=hevc
 codec_tag_string=hvc1
 ```
 
-可以先直接尝试播放，通常不需要重新编码。
+可以先直接实机测试。
 
-如果看到：
+如果是：
 
 ```text
 codec_name=hevc
 codec_tag_string=hev1
 ```
 
-在 Apple Safari 上建议先无损重封装成 `hvc1`：
+优先尝试无损重封装成 `hvc1`：
 
 ```powershell
 ffmpeg -i "input.mp4" `
@@ -141,59 +244,43 @@ ffmpeg -i "input.mp4" `
   "output.hvc1.mp4"
 ```
 
-这个操作：
+这个过程通常不会重新编码视频和音频，因此不会因为转码降低画质，也不会改变 4K 分辨率。
+
+如果输入文件带 MJPEG 封面等额外 video stream，不建议：
 
 ```text
-不会重新编码视频
-不会重新编码音频
-不会降低画质
-不会改变 4K 分辨率
-主要只是重新写 MP4 并将 HEVC 标记改为 hvc1
+-map 0 -tag:v hvc1
 ```
 
-如果输入文件带有 MJPEG 封面图等额外 video stream，不要使用 `-map 0 -tag:v hvc1`，否则 FFmpeg 可能会尝试把封面图也标记成 `hvc1`。上面的 `-map 0:v:0 -map "0:a?" -tag:v:0 hvc1` 会只保留主视频和音频，更适合网页播放。
+否则 FFmpeg 可能把封面流也尝试标记成 `hvc1`。网页播放更推荐：
 
-### 其他编码格式怎么办
+```text
+-map 0:v:0 -map "0:a?" -tag:v:0 hvc1
+```
 
-建议按下面的逻辑处理：
+只保留主视频和音频。
 
-| 输入格式 | 建议 |
+## 各种输入格式怎么处理
+
+| 输入 | 建议 |
 | --- | --- |
-| MP4 + H.264 + AAC | 直接播放，通常无需处理 |
-| MP4 + HEVC/H.265 + `hvc1` | Apple 设备可先直接尝试 |
-| MP4 + HEVC/H.265 + `hev1` | 优先无损重封装为 `hvc1` |
-| HEVC 重封装后仍无法播放 | 转成 H.264 + AAC |
+| MP4 + H.264 + AAC | 直接播放 |
+| MP4 + HEVC + `hvc1` | Apple 设备先直接测试 |
+| MP4 + HEVC + `hev1` | 优先无损重封装为 `hvc1` |
+| HEVC 改成 `hvc1` 后仍不能播 | 转 H.264 + AAC |
 | AV1 | 为最大兼容性建议转 H.264 |
-| VP9 / WebM | 为 Apple / 多设备统一兼容建议转 H.264 MP4 |
-| MKV | 浏览器兼容性不统一；建议转/封装为 MP4 |
-| MPEG-4 Part 2 / Xvid / DivX | 建议转 H.264 |
-| H.264 10-bit / yuv422p / yuv444p | 建议转成 H.264 8-bit yuv420p |
-| DTS / TrueHD 等音频 | 建议转 AAC-LC |
+| VP9 / WebM | 多设备统一观看建议转 H.264 MP4 |
+| MKV | 浏览器兼容性不统一，建议封装/转为 MP4 |
+| Xvid / DivX / MPEG-4 Part 2 | 建议转 H.264 |
+| H.264 10-bit | 建议转 H.264 8-bit |
+| yuv422p / yuv444p | 建议转 yuv420p |
+| DTS / TrueHD 等音轨 | 建议转 AAC-LC |
 
-注意：**改文件后缀不等于转码。** 例如把 `.mkv` 改成 `.mp4` 并不会让浏览器自动支持里面的视频编码。
+**只修改文件后缀没有用。** `.mkv` 改名成 `.mp4` 不会改变内部编码。
 
-### 检查一个视频到底是什么格式
+## 任意片源转成网页兼容版
 
-可以直接使用：
-
-```powershell
-ffprobe -hide_banner "input.mp4"
-```
-
-重点关注：
-
-```text
-Video: h264 / hevc / av1 / vp9 ...
-codec_tag_string=hvc1 / hev1 ...
-pix_fmt=yuv420p / yuv420p10le ...
-Audio: aac / ac3 / dts / truehd ...
-```
-
-### 任意片源转换为通用兼容版
-
-如果不想研究原始编码，最省事的做法就是统一生成 H.264 网页兼容版。
-
-CPU 转码：
+### CPU / libx264
 
 ```powershell
 ffmpeg -i "input.mkv" `
@@ -210,7 +297,7 @@ ffmpeg -i "input.mkv" `
   "output.web.mp4"
 ```
 
-NVIDIA GPU 转码：
+### NVIDIA NVENC
 
 ```powershell
 ffmpeg -i "input.mkv" `
@@ -230,15 +317,15 @@ ffmpeg -i "input.mkv" `
   "output.web.mp4"
 ```
 
-上面的命令 **没有缩放参数**，因此原视频如果是 3840×2160，输出仍然可以保持 3840×2160。HEVC / AV1 → H.264 属于真正的重新编码，不可能做到数学意义上的无损，但 `CRF 18` / `CQ 18` 通常已经是很高的观感质量。
+上面的命令没有缩放参数，所以原视频是 `3840×2160` 时仍可以保持 `3840×2160`。
 
-如果输入音频已经确认是普通 AAC-LC，也可以把：
+如果已经确认原始音频就是普通 AAC-LC，可以把：
 
 ```text
 -c:a aac -b:a 192k -ac 2
 ```
 
-替换成：
+改成：
 
 ```text
 -c:a copy
@@ -246,91 +333,28 @@ ffmpeg -i "input.mkv" `
 
 避免重复压缩音频。
 
-### 推荐处理流程
+## 推荐的视频处理流程
 
 ```text
-拿到一个新视频
-      ↓
-ffprobe 检查编码
-      ↓
+拿到新视频
+    ↓
+ffprobe 检查
+    ↓
 MP4 + H.264 + AAC？ ── 是 → 直接使用
-      │
-      否
-      ↓
-HEVC + hev1？ ─────── 是 → 先无损改成 hvc1
-      │                         ↓
-      │                    实机测试 Safari
-      │                         ↓
-      │                       能播 → 使用
-      ↓
-其他格式 / 仍然不能播放
-      ↓
-转成 MP4 + H.264 + AAC-LC + yuv420p
-      ↓
-上传到 123
-      ↓
-TogetherVideo 播放
+    │
+    否
+    ↓
+HEVC + hvc1？ ──────── 是 → 实机测试
+    │
+HEVC + hev1？ ──────── 是 → 无损重封装 hvc1 → 实机测试
+    │
+    ↓
+仍然不能播放 / 其他复杂格式
+    ↓
+MP4 + H.264 8-bit yuv420p + AAC-LC + faststart
 ```
 
-## 视频数据链路
-
-```text
-浏览器 A ───────────────→ 123 WebDAV / CDN
-   │                           ↑
-   │ WebSocket                 │ 视频 Range 数据
-   ↓                           │
-TogetherVideo 服务器           │
-   ↑                           │
-   │ WebSocket                 │
-   │                           │
-浏览器 B ───────────────→ 123 WebDAV / CDN
-```
-
-TogetherVideo 服务器只负责：
-
-- 两个人的在线与真实缓冲状态
-- 播放 / 暂停 / 拖动 / 倍速同步
-- 自动对轴
-- “等等我”
-- WebDAV 连接测试与目录列表
-- 使用 WebDAV 凭据探测并解析临时下载地址
-
-**服务器不会 pipe 视频、不会转发视频 Range、不会缓存或转码视频。**
-
-## 123 WebDAV 与浏览器兼容层
-
-目录浏览使用 WebDAV `PROPFIND`。
-
-对需要认证的 123 WebDAV 文件，服务端只使用 HEAD 或极小的 Range 请求发现浏览器可以访问的临时 CDN 地址，然后返回 307；视频正文不进入 TogetherVideo 服务器。
-
-123 普通下载节点可能返回：
-
-```text
-Content-Type: application/octet-stream
-Content-Disposition: attachment
-X-Content-Type-Options: nosniff
-```
-
-浏览器 Service Worker 会在本地透传 Range，把交给原生 `<video>` 的响应修正为正确的视频 MIME 和 `inline`，同时保留 206 / Content-Range。视频字节仍然是 123 CDN → 浏览器。
-
-## 同步功能
-
-- 永久只有一个房间，最多两个人在线
-- 当前视频同步
-- 播放 / 暂停同步
-- 拖动进度同步
-- 0.5× / 0.75× / 1× / 1.25× / 1.5× / 2× 倍速同步
-- 小偏差通过轻微临时倍速平滑追赶
-- 大偏差才硬 seek
-- 恢复期间冻结 seek / 倍速追赶
-- 一方持续真实缓冲时双方暂时暂停
-- 媒体重新可播放后先恢复房间播放，再连续验证本地播放稳定性
-- “等等我”一键暂停双方
-- Socket.IO 自动重连
-- 重连后恢复媒体、进度、播放状态和倍速
-- 手机端播放器优先布局
-
-服务端保存唯一权威时间线，包括 `media`、`mediaVersion`、`playing`、`position`、`rate`、`anchorAt` 和 `revision`。客户端定期测量 RTT 并与服务端时间线校准。
+---
 
 ## WebDAV 设置
 
@@ -343,96 +367,31 @@ WebDAV 地址
 根目录
 ```
 
-123 云盘示例：
+浏览器不会把 WebDAV 用户名和密码塞进 `<video src>`。服务端使用认证信息进行 `PROPFIND` 和极小的 HEAD / Range 探测，找到最终浏览器可访问的临时 CDN 地址；视频正文仍然由浏览器直接获取。
 
-```text
-https://webdav.123pan.cn/webdav
-```
-
-根目录通常可以使用 `/`。先点击 **测试连接**，成功后点击 **保存并使用**。
-
-WebDAV 密码保存在服务器 `data/settings.json` 中，设置 API 不会把密码明文返回前端。
+如果 WebDAV 只能返回“必须携带 Basic Auth 才能下载正文”的地址，而没有匿名/签名临时 URL，TogetherVideo 会拒绝把视频正文变成服务端代理流。
 
 ## 部署
 
-要求：
-
-- Node.js 20+
-- `data/` 可持久化
-- 生产环境使用 HTTPS
+需要 Node.js 20+：
 
 ```bash
+git pull
 npm install
 npm start
 ```
 
-默认端口为 `3000`。自动部署平台提供 `PORT` 时会自动使用该端口。
+生产环境建议使用 HTTPS，并由 Nginx / Caddy / 宝塔反向代理到 Node 服务。Service Worker 在公网移动端需要安全上下文，因此生产环境不要直接使用普通 HTTP 域名。
 
-首次默认站点密码：
-
-```text
-change-me
-```
-
-登录后请在设置中修改。
-
-## HTTPS
-
-3.0 生产环境应通过 HTTPS 访问，因为 Service Worker 和现代浏览器媒体能力依赖安全上下文。
+## 3.1 同步原则
 
 ```text
-浏览器
-  │ HTTPS
-  ▼
-Nginx / Caddy / 部署平台反代
-  │ HTTP
-  ▼
-TogetherVideo :3000
+小偏差：不管
+正常播放：不改临时倍速
+拖动：暂停双方 → 双方缓存 → 同时播放
+后加入：暂停双方 → 双方缓存 → 同时播放
+持续卡顿：暂停双方 → 双方缓存 → 同时播放
+严重持续不同步：重新进入一次 barrier
 ```
 
-反向代理终止 HTTPS 时建议：
-
-```env
-TRUST_PROXY=true
-COOKIE_SECURE=true
-```
-
-## 持久化
-
-持续保存：
-
-```text
-data/
-```
-
-主要包含：
-
-```text
-data/settings.json
-data/watch-state.json
-```
-
-升级到 3.0 不需要清空数据目录。
-
-## 开发检查
-
-```bash
-npm install
-npm run check
-```
-
-CI 会检查：
-
-- 服务端和浏览器脚本语法
-- 运行时依赖是否完整
-- 3.0 媒体恢复状态机
-- Safari 不进入 libmedia fallback
-- 恢复期间冻结自动对轴
-- 自动重载次数上限
-- WebDAV 解析与认证重定向安全规则
-- 单房间和同步状态回归测试
-- 后端入口结构守卫与共享缓冲协调行为
-
-## 第三方组件
-
-非 Apple 浏览器的可选兼容核心使用 `@libmedia/avplayer`。许可和归属信息见 `THIRD_PARTY_NOTICES.md`。
+对这个固定两人的看片场景，**观感优先于数学意义上每一秒都完全重合**。
