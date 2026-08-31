@@ -69,6 +69,7 @@
       this.loadToken = 0;
       this.avResizeObserver = null;
       this.avResizeHandler = null;
+      this.resumeOverlay = this.shell?.querySelector?.('#resumeOverlay') || null;
       this._bindNative();
       this._bindControls();
       this._showMode('native');
@@ -78,6 +79,14 @@
       this.events.dispatchEvent(detail === undefined
         ? new Event(type)
         : new CustomEvent(type, { detail }));
+    }
+
+    _requestInteraction(detail = {}) {
+      if (this.resumeOverlay) {
+        this.resumeOverlay.textContent = '点击开启声音并继续 HEVC 播放';
+        this.resumeOverlay.classList.remove('hidden');
+      }
+      this._emit('interactionrequired', detail);
     }
 
     _bindNative() {
@@ -114,7 +123,7 @@
         if (this.paused) {
           this.play().catch((error) => {
             this.avError = { code: 4, message: error?.message || String(error) };
-            this._emit('interactionrequired', { error });
+            this._requestInteraction({ error });
           });
         } else {
           this.pause();
@@ -287,6 +296,10 @@
           this._emit('canplay');
         }
       });
+      player.on(Events.RESUME, () => {
+        if (!active()) return;
+        this._requestInteraction({ reason: 'media-resume' });
+      });
       player.on(Events.TIMEOUT, () => {
         if (!active()) return;
         this.avStalled = true;
@@ -357,6 +370,11 @@
           enableWebGPU: !isAppleMobile(),
           enableWorker: true,
           enableAudioWorklet: true,
+          // Prefer Safari's mature MSE/system decoder on iPad whenever the
+          // codec is actually MSE-supported. libmedia performs isTypeSupported
+          // checks before calling this hook, so unsupported codecs still fall
+          // back to WebCodecs/WASM.
+          checkUseMSE: () => isAppleMobile(),
           // libmedia defaults to 4s. 30s caused very long initial/refill waits
           // and excessive memory pressure for 4K HEVC on iPad.
           preLoadTime: 4,
@@ -392,6 +410,7 @@
         error.name = 'NotAllowedError';
         throw error;
       }
+      this.resumeOverlay?.classList.add('hidden');
       return true;
     }
 
@@ -432,8 +451,17 @@
     async play() {
       if (this.mode === 'native') return this.video.play();
       if (!this.avPlayer) throw new Error('兼容播放器尚未就绪');
-      if (this.avPlayer.isSuspended?.()) await this.unlock();
-      return this.avPlayer.play({ subtitle: false });
+      // A real tap may unlock iOS audio before AVPlayer enters/continues PLAYED.
+      // Programmatic sync calls must not block video when audio is still locked:
+      // libmedia can continue MSE playback muted or decoder video via fakePlay.
+      if (this.avPlayer.isSuspended?.() && navigator.userActivation?.isActive) {
+        await this.unlock().catch(() => {});
+      }
+      const result = await this.avPlayer.play({ subtitle: false });
+      if (this.avPlayer.isSuspended?.()) {
+        this._requestInteraction({ reason: 'audio-context' });
+      }
+      return result;
     }
 
     pause() {
