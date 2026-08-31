@@ -63,8 +63,10 @@ async function main() {
   });
   registerSocketGateway({ io, room, coordinator, mediaService });
 
-  const libmediaAvPlayerDir = path.join(process.cwd(), 'node_modules', '@libmedia', 'avplayer', 'dist', 'esm');
-  app.use('/vendor/libmedia/avplayer', express.static(libmediaAvPlayerDir, {
+  // 3.2 uses Artplayer only as the UI/control component. Media bytes still flow
+  // through the browser's native HTMLVideoElement directly from the provider CDN.
+  const artplayerDir = path.join(process.cwd(), 'node_modules', 'artplayer', 'dist');
+  app.use('/vendor/artplayer', express.static(artplayerDir, {
     etag: true,
     maxAge: '1d',
     setHeaders(res) {
@@ -93,7 +95,7 @@ async function main() {
   server.listen(config.port, config.host, () => {
     console.log(`[TogetherVideo ${appVersion}] listening on ${config.host}:${config.port}`);
     console.log(`[TogetherVideo ${appVersion}] fixed room; max participants=${config.maxParticipants}`);
-    console.log(`[TogetherVideo ${appVersion}] Safari uses the native media pipeline`);
+    console.log(`[TogetherVideo ${appVersion}] Artplayer UI + native HTMLVideoElement pipeline`);
     console.log(`[TogetherVideo ${appVersion}] media bytes are never proxied by this server`);
   });
 
