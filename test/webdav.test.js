@@ -45,6 +45,64 @@ test('WebDAV PROPFIND parses folders and video metadata', async (t) => {
   assert.equal(result.items[1].size, 12345);
 });
 
+test('123pan trusted WebDAV redirect keeps Basic auth and PROPFIND method', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  const requests = [];
+
+  global.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    assert.equal(options.method, 'PROPFIND');
+    assert.equal(options.redirect, 'manual');
+    assert.match(options.headers.Authorization, /^Basic /);
+
+    if (requests.length === 1) {
+      return new Response(null, {
+        status: 307,
+        headers: { location: 'https://webdav-demo.pd1.123pan.cn/webdav' },
+      });
+    }
+    return new Response(XML, { status: 207, headers: { 'content-type': 'application/xml' } });
+  };
+
+  const client = new WebDavClient({
+    url: 'https://webdav.123pan.cn/webdav',
+    username: 'example-user',
+    password: 'example-app-password',
+    root: '/',
+  });
+
+  const result = await client.test();
+  assert.equal(result.ok, true);
+  assert.equal(requests.length, 2);
+  assert.equal(new URL(requests[1].url).hostname, 'webdav-demo.pd1.123pan.cn');
+});
+
+test('WebDAV auth is not forwarded to an unrelated redirect host', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+
+  global.fetch = async (_url, options) => {
+    assert.match(options.headers.Authorization, /^Basic /);
+    return new Response(null, {
+      status: 307,
+      headers: { location: 'https://evil.example.net/webdav' },
+    });
+  };
+
+  const client = new WebDavClient({
+    url: 'https://webdav.123pan.cn/webdav',
+    username: 'example-user',
+    password: 'example-app-password',
+    root: '/',
+  });
+
+  await assert.rejects(
+    () => client.test(),
+    (error) => error.code === 'WEBDAV_UNTRUSTED_AUTH_REDIRECT' && error.status === 409,
+  );
+});
+
 test('authenticated playback returns provider redirect without exposing credentials', async (t) => {
   const originalFetch = global.fetch;
   t.after(() => { global.fetch = originalFetch; });
