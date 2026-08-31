@@ -25,6 +25,20 @@ function registerHttpRoutes(options = {}) {
     return { mediaPath };
   }
 
+  async function resolveBrowserDestination(req, mediaPath) {
+    // Every browser gets a fresh provider URL. The WebDAV credential remains on
+    // the server; only the final anonymous/signed media URL is returned.
+    const playable = await mediaService.resolvePlayable(mediaPath, { fresh: true });
+    const destination = new URL(playable.url);
+    if (!['http:', 'https:'].includes(destination.protocol)) {
+      throw new WebDavError('WebDAV 返回了浏览器无法使用的播放协议', 502, 'WEBDAV_BAD_DIRECT_URL');
+    }
+    if (req.secure && destination.protocol === 'http:') {
+      throw new WebDavError('WebDAV 只返回 HTTP 视频直链，而当前网站是 HTTPS；浏览器会阻止混合内容播放。请使用 HTTPS WebDAV/直链。', 409, 'WEBDAV_MIXED_CONTENT');
+    }
+    return { destination, strategy: playable.strategy || 'direct' };
+  }
+
   app.get('/healthz', (_req, res) => res.json({ ok: true, version: appVersion }));
 
   app.post('/api/login', (req, res) => {
@@ -114,27 +128,34 @@ function registerHttpRoutes(options = {}) {
     } catch (error) { next(error); }
   });
 
+  // 3.2 resolver: Artplayer asks for the final URL first, then assigns that URL
+  // directly to its native <video>. This intentionally bypasses the old Service
+  // Worker media bridge and lets Safari/Chrome own Range, buffering and seeking.
+  app.get('/api/media/url', async (req, res, next) => {
+    try {
+      const checked = checkedMediaPath(req.query.path);
+      if (checked.error) return res.status(400).json({ ok: false, error: checked.error });
+      const { destination, strategy } = await resolveBrowserDestination(req, checked.mediaPath);
+      res.set('Cache-Control', 'private, no-store');
+      res.set('Referrer-Policy', 'no-referrer');
+      res.json({
+        ok: true,
+        url: destination.toString(),
+        strategy,
+      });
+    } catch (error) { next(error); }
+  });
+
+  // Keep the old redirect endpoint for backwards compatibility and diagnostics.
   app.get('/api/media', async (req, res, next) => {
     try {
       const checked = checkedMediaPath(req.query.path);
       if (checked.error) return res.status(400).json({ ok: false, error: checked.error });
-
-      // Resolve a fresh signed provider URL for every browser bootstrap. The
-      // browser-local Service Worker owns its own short cache, so sharing one
-      // server-side signed URL across two viewers only creates cross-client
-      // coupling and can break the viewer who joins later.
-      const playable = await mediaService.resolvePlayable(checked.mediaPath, { fresh: true });
-      const destination = new URL(playable.url);
-      if (!['http:', 'https:'].includes(destination.protocol)) {
-        throw new WebDavError('WebDAV 返回了浏览器无法使用的播放协议', 502, 'WEBDAV_BAD_DIRECT_URL');
-      }
-      if (req.secure && destination.protocol === 'http:') {
-        throw new WebDavError('WebDAV 只返回 HTTP 视频直链，而当前网站是 HTTPS；浏览器会阻止混合内容播放。请使用 HTTPS WebDAV/直链。', 409, 'WEBDAV_MIXED_CONTENT');
-      }
+      const { destination, strategy } = await resolveBrowserDestination(req, checked.mediaPath);
       res.set('Cache-Control', 'private, no-store');
       res.set('Referrer-Policy', 'no-referrer');
       res.set('X-TogetherVideo-Media-Mode', 'browser-direct');
-      res.set('X-TogetherVideo-Media-Strategy', playable.strategy || 'direct');
+      res.set('X-TogetherVideo-Media-Strategy', strategy);
       res.status(307).set('Location', destination.toString()).end();
     } catch (error) { next(error); }
   });
