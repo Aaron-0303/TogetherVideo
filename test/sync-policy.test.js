@@ -23,6 +23,19 @@ test('soft correction starts after two persistent samples', () => {
   assert.ok(second.rate > 1.03 && second.rate < 1.05);
 });
 
+test('active soft correction keeps one steady playback rate instead of retuning every sample', () => {
+  const sync = new Reconciler();
+  sync.decide({ drift: -1.0, desiredRate: 1, playing: true, sampled: true });
+  const started = sync.decide({ drift: -1.0, desiredRate: 1, playing: true, sampled: true });
+  const later = sync.decide({ drift: -0.72, desiredRate: 1, playing: true, sampled: true });
+  const almostSettled = sync.decide({ drift: -0.31, desiredRate: 1, playing: true, sampled: true });
+  assert.equal(started.action, 'rate');
+  assert.equal(later.action, 'rate');
+  assert.equal(almostSettled.action, 'rate');
+  assert.equal(later.rate, started.rate);
+  assert.equal(almostSettled.rate, started.rate);
+});
+
 test('positive and negative drift corrections are symmetric', () => {
   const behind = new Reconciler();
   behind.decide({ drift: -1, desiredRate: 1, playing: true, sampled: true });
