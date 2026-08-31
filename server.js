@@ -52,27 +52,14 @@ async function main() {
     maxParticipants: config.maxParticipants,
   });
 
-  registerHttpRoutes({
-    app,
-    io,
-    settings,
-    room,
-    mediaService,
-    coordinator,
-    appVersion,
-  });
+  registerHttpRoutes({ app, io, settings, room, mediaService, coordinator, appVersion });
   registerSocketGateway({ io, room, coordinator, mediaService });
 
-  // Artplayer provides the controls; playback still uses the browser's native
-  // HTMLVideoElement. The browser-local MIME bridge is registered by the HTTP
-  // route layer and video bytes never pass through this Node server.
-  const artplayerDir = path.join(process.cwd(), 'node_modules', 'artplayer', 'dist');
-  app.use('/vendor/artplayer', express.static(artplayerDir, {
+  const libmediaAvPlayerDir = path.join(process.cwd(), 'node_modules', '@libmedia', 'avplayer', 'dist', 'esm');
+  app.use('/vendor/libmedia/avplayer', express.static(libmediaAvPlayerDir, {
     etag: true,
     maxAge: '1d',
-    setHeaders(res) {
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-    },
+    setHeaders(res) { res.setHeader('Cache-Control', 'public, max-age=86400'); },
   }));
 
   const publicDir = path.join(process.cwd(), 'public');
@@ -96,7 +83,7 @@ async function main() {
   server.listen(config.port, config.host, () => {
     console.log(`[TogetherVideo ${appVersion}] listening on ${config.host}:${config.port}`);
     console.log(`[TogetherVideo ${appVersion}] fixed room; max participants=${config.maxParticipants}`);
-    console.log(`[TogetherVideo ${appVersion}] Artplayer UI + native HTMLVideoElement + MIME bridge`);
+    console.log(`[TogetherVideo ${appVersion}] restored stable native media pipeline`);
     console.log(`[TogetherVideo ${appVersion}] media bytes are never proxied by this server`);
   });
 
@@ -107,7 +94,6 @@ async function main() {
     console.log(`[TogetherVideo ${appVersion}] ${signal}: shutting down`);
     coordinator.stop();
     for (const socket of io.sockets.sockets.values()) socket.disconnect(true);
-
     const forceExit = setTimeout(() => process.exit(1), 5000);
     forceExit.unref();
     await Promise.allSettled([settings.flush(), room.flush()]);
