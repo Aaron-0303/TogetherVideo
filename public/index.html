@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#0b0d12" />
-  <title>TogetherVideo 3.0.6</title>
-  <link rel="stylesheet" href="/styles.css?v=3.0.6" />
+  <title>TogetherVideo 3.1</title>
+  <link rel="stylesheet" href="/styles.css?v=3.1" />
 </head>
 <body>
   <div id="loginLayer" class="login-layer hidden">
@@ -23,7 +23,7 @@
 
   <div id="app" class="app hidden">
     <header class="topbar">
-      <div class="brand"><span>♥</span><strong>TogetherVideo</strong><small>3.0.6</small></div>
+      <div class="brand"><span>♥</span><strong>TogetherVideo</strong><small>3.1</small></div>
       <div class="top-actions">
         <span id="socketBadge" class="pill">连接中</span>
         <span id="onlineBadge" class="pill">0 / 2 在线</span>
@@ -60,7 +60,7 @@
             <div id="emptyPlayer" class="empty-player">
               <span class="play-icon">▶</span>
               <strong>从片库选择视频</strong>
-              <span>3.0.6 后加入用户使用独立媒体直链，并兼容浏览器自动播放限制</span>
+              <span>3.1：拖动、后加入或严重卡顿时先暂停，双方缓存完成后同时播放</span>
             </div>
             <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击继续同步播放</button>
             <div id="compatControls" class="compat-controls hidden">
@@ -75,7 +75,7 @@
 
           <div class="control-bar">
             <button id="waitBtn" class="wait-button" type="button">等等我</button>
-            <button id="syncNowBtn" class="secondary" type="button">立即对轴</button>
+            <button id="syncNowBtn" class="secondary" type="button">重新同步</button>
             <label class="rate-control">倍速
               <select id="rateSelect">
                 <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
@@ -119,13 +119,11 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/media-transport.js?v=3.0.6"></script>
-  <script src="/hybrid-media.js?v=3.0.6"></script>
+  <script src="/media-transport.js?v=3.1"></script>
+  <script src="/hybrid-media.js?v=3.1"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/sync-policy.js?v=3.0.6-qoe2"></script>
-  <script src="/media-recovery.js?v=3.0.6"></script>
-  <script src="/app.js?v=3.0.6-seek2"></script>
-  <script src="/playback-unlock.js?v=3.0.6"></script>
-  <script src="/media-diagnostics.js?v=3.0.6"></script>
+  <script src="/app-3.1.js?v=3.1-barrier1"></script>
+  <script src="/playback-unlock.js?v=3.1"></script>
+  <script src="/media-diagnostics.js?v=3.1"></script>
 </body>
 </html>
