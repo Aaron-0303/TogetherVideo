@@ -1,4 +1,4 @@
-/* TogetherVideo sync policy: tight, symmetric, hysteresis-based reconciliation. */
+/* TogetherVideo sync policy: conservative, hysteresis-based reconciliation. */
 (function attachSyncPolicy(root, factory) {
   const api = factory();
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -8,14 +8,14 @@
     rttWindow: 9,
     rttKeepRatio: 0.6,
     maxHalfRttMs: 400,
-    settledDrift: 0.22,
-    softDrift: 0.4,
-    hardDrift: 3.0,
-    stableSamples: 2,
-    hardStableSamples: 3,
-    minCorrectionDelta: 0.012,
-    maxCorrectionDelta: 0.05,
-    correctionGain: 0.035,
+    settledDrift: 0.2,
+    softDrift: 0.55,
+    hardDrift: 1.25,
+    stableSamples: 3,
+    hardStableSamples: 2,
+    minCorrectionDelta: 0.006,
+    maxCorrectionDelta: 0.015,
+    correctionGain: 0.012,
     afterBufferSoftDelayMs: 3000,
     afterBufferHardDelayMs: 8000,
     hardSeekCooldownMs: 15000,
@@ -85,7 +85,7 @@
       const previous = this.driftSamples[this.driftSamples.length - 1];
       if (previous != null && Math.sign(previous) !== sign) this.resetDrift();
       this.driftSamples.push(value);
-      while (this.driftSamples.length > this.options.hardStableSamples + 2) this.driftSamples.shift();
+      while (this.driftSamples.length > Math.max(this.options.stableSamples, this.options.hardStableSamples) + 2) this.driftSamples.shift();
       return this.driftSamples.length;
     }
 
@@ -170,9 +170,9 @@
       }
 
       // Once a soft correction starts, keep one steady playback rate until the
-      // streams settle. Recalculating playbackRate every one-second sync sample
-      // makes Safari/Chromium repeatedly retune their media pipeline and can feel
-      // like tiny periodic stalls even though the timeline itself is continuous.
+      // streams settle. More importantly, the correction is deliberately tiny:
+      // a sync controller must never make one viewer look visibly sped-up while
+      // the other remains at normal speed.
       if (this.correctionActive) {
         if (abs <= this.options.settledDrift || (this.correctionSign && sign !== this.correctionSign)) {
           this.stopCorrection();
@@ -221,8 +221,8 @@
         return { action: 'observe', rate, absDrift: abs, stableSamples: 0 };
       }
 
-      // 0.22-0.40 s is intentionally a dead band: visible sync is already good
-      // and no playback-rate changes are worth introducing here.
+      // 0.20-0.55 s is a dead band. This is already close enough for a private
+      // two-viewer room and avoids reacting to RTT/currentTime sampling noise.
       if (abs < this.options.softDrift) {
         this.resetDrift();
         return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
