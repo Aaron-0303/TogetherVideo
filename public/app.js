@@ -26,16 +26,18 @@ const player = new HybridMedia({
 window.TogetherMediaPlayer = player;
 
 const syncReconciler = new SyncPolicy.Reconciler();
+const mediaRecovery = MediaRecovery.createTracker();
+window.TogetherMediaRecovery = mediaRecovery;
 
 const state = {
   nickname: '', participantId: '', socket: null, settings: null,
   libraryPath: '', librarySeq: 0,
   mediaPath: '', mediaVersion: 0, sourceLoading: false, mediaReady: false, loadSeq: 0,
   lastSnapshot: null, lastRevision: -1, halfRttMs: 0,
-  buffering: false, bufferTimer: null,
+  buffering: false, recoveryCheckTimer: null, recoveryReloadTimer: null,
   expectedPlayUntil: 0, expectedPauseUntil: 0, expectedSeek: null, expectedRate: null,
   syncTimer: null, syncSeq: 0, lastSyncSeq: 0, lastPeerName: '',
-  seeking: false,
+  seeking: false, fallbackUnavailable: false,
 };
 
 async function api(url, options = {}) {
@@ -55,6 +57,7 @@ async function api(url, options = {}) {
 function showLogin() {
   state.socket?.disconnect();
   clearInterval(state.syncTimer);
+  clearRecoveryTimers();
   ui.loginLayer.classList.remove('hidden');
   ui.app.classList.add('hidden');
   ui.settingsModal.classList.add('hidden');
@@ -149,7 +152,6 @@ function connectSocket() {
   socket.on('connect', () => {
     ui.socketBadge.textContent = '已连接';
     ui.socketBadge.classList.add('online');
-    setNotice('');
     requestSync(true);
   });
   socket.on('disconnect', () => {
@@ -181,10 +183,18 @@ function requestSync(force = false) {
   socket.timeout(2500).emit('sync:request', (error, snapshot) => {
     if (error || !snapshot || seq < state.lastSyncSeq) return;
     state.lastSyncSeq = seq;
-    const rtt = performance.now() - started;
-    state.halfRttMs = syncReconciler.sampleRtt(rtt);
+    state.halfRttMs = syncReconciler.sampleRtt(performance.now() - started);
     applySnapshot(snapshot, force, true);
   });
+}
+
+function localMediaStatus() {
+  if (state.sourceLoading) return '正在准备媒体';
+  if (state.buffering) return '正在缓冲';
+  const phase = mediaRecovery.snapshot().phase;
+  if (phase === 'recovering') return '恢复中';
+  if (phase === 'stabilizing') return '验证稳定播放';
+  return state.mediaReady ? '播放就绪' : '等待媒体';
 }
 
 function renderPresence(payload = {}) {
@@ -194,7 +204,7 @@ function renderPresence(payload = {}) {
   const self = participants.find((item) => item.id === state.participantId);
   const peer = participants.find((item) => item.id !== state.participantId);
   ui.selfStatus.textContent = self ? '在线' : '重连中';
-  ui.selfBuffering.textContent = state.buffering ? '正在缓冲' : '播放就绪';
+  ui.selfBuffering.textContent = localMediaStatus();
   if (peer) state.lastPeerName = peer.nickname;
   ui.peerStatus.textContent = peer ? `${peer.nickname} · 在线` : (state.lastPeerName ? `${state.lastPeerName} · 离线` : '离线');
   ui.peerBuffering.textContent = peer ? (peer.buffering ? '对方正在缓冲' : '播放就绪') : '等待上线';
@@ -266,8 +276,7 @@ ui.libraryToggle.addEventListener('click', () => ui.libraryPanel.classList.add('
 ui.closeLibraryBtn.addEventListener('click', () => ui.libraryPanel.classList.remove('open'));
 
 function clearCorrection(restore = true) {
-  syncReconciler.correctionActive = false;
-  syncReconciler.resetDrift();
+  syncReconciler.stopCorrection?.();
   if (restore && state.lastSnapshot && state.mediaReady) setProgrammaticRate(Number(state.lastSnapshot.rate || 1));
 }
 
@@ -284,7 +293,7 @@ function setProgrammaticSeek(target) {
   const duration = Number(player.duration);
   const upper = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.05) : Number.POSITIVE_INFINITY;
   const value = Math.min(upper, Math.max(0, target));
-  state.expectedSeek = { target: value, until: Date.now() + 3000 };
+  state.expectedSeek = { target: value, until: Date.now() + 3500 };
   try {
     player.currentTime = value;
     syncReconciler.noteHardSeek();
@@ -314,6 +323,15 @@ function targetPosition(snapshot) {
   return base + state.halfRttMs / 1000 * Number(snapshot.rate || 1);
 }
 
+function recoveryLabel() {
+  const phase = mediaRecovery.snapshot().phase;
+  if (phase === 'stalled') return '媒体卡顿';
+  if (phase === 'recovering') return '媒体恢复中';
+  if (phase === 'stabilizing') return '验证稳定播放';
+  if (phase === 'preparing') return '准备媒体';
+  return '';
+}
+
 function applySnapshot(snapshot, force = false, sampled = false) {
   if (!snapshot || typeof snapshot !== 'object') return;
   const revision = Number(snapshot.revision || 0);
@@ -330,19 +348,19 @@ function applySnapshot(snapshot, force = false, sampled = false) {
     loadMedia(snapshot);
     return;
   }
-  // Loading/demuxing is preparation, not playback starvation. Reporting it as
-  // shared buffering can make the server pause the room before libmedia has had
-  // a chance to render its first frame, creating a pause/wait deadlock.
   if (state.sourceLoading || !state.mediaReady) return;
   applyPlayback(snapshot, force, sampled);
 }
 
 function loadMedia(snapshot) {
   const seq = ++state.loadSeq;
+  clearRecoveryTimers();
+  mediaRecovery.reset({ preparing: true });
   state.mediaPath = snapshot.media.path;
   state.mediaVersion = Number(snapshot.mediaVersion || 0);
   state.sourceLoading = true;
   state.mediaReady = false;
+  state.fallbackUnavailable = false;
   clearCorrection(false);
   setBuffering(false);
   ui.mediaTitle.textContent = snapshot.media.name || snapshot.media.path.split('/').pop();
@@ -350,7 +368,7 @@ function loadMedia(snapshot) {
   ui.resumeOverlay.classList.add('hidden');
   ui.syncBadge.textContent = '正在加载';
   ui.syncBadge.classList.remove('good');
-  setNotice('正在从 WebDAV 获取浏览器直连地址…');
+  setNotice('正在获取 123 媒体地址…');
 
   player.pause();
   player.removeAttribute('src');
@@ -362,12 +380,8 @@ function loadMedia(snapshot) {
     if (seq !== state.loadSeq) return;
     state.sourceLoading = false;
     state.mediaReady = true;
-    if (player.mode === 'libmedia') {
-      setNotice('HEVC 兼容播放器已解析媒体，正在准备首帧；视频仍直接从 123 获取。');
-    } else {
-      setNotice('');
-    }
-    if (player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
+    if (player.mode === 'libmedia') setNotice('兼容播放器已解析媒体，正在准备首帧。');
+    else setNotice('媒体信息已就绪，正在准备播放。');
     requestSync(true);
     refreshActiveLibraryItem();
   };
@@ -375,12 +389,15 @@ function loadMedia(snapshot) {
 }
 
 function clearMedia() {
-  state.loadSeq++;
+  state.loadSeq += 1;
+  clearRecoveryTimers();
+  mediaRecovery.reset();
   state.mediaPath = '';
   state.mediaVersion = Number(state.lastSnapshot?.mediaVersion || state.mediaVersion + 1);
   state.sourceLoading = false;
   state.mediaReady = false;
   state.seeking = false;
+  state.fallbackUnavailable = false;
   clearCorrection(false);
   setBuffering(false);
   player.pause();
@@ -400,6 +417,20 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   const current = Number(player.currentTime || 0);
   const drift = current - target;
   const absDrift = Math.abs(drift);
+
+  // v3: while the media pipeline is recovering, do not repeatedly seek or use
+  // playback-rate chasing. Preserve only the authoritative play/pause intent.
+  // Explicit user seeks remain authoritative and are applied immediately.
+  if (mediaRecovery.shouldFreezeSync() && snapshot.reason !== 'seek') {
+    setProgrammaticRate(desiredRate);
+    ui.rateSelect.value = String(desiredRate);
+    ui.syncBadge.textContent = `${recoveryLabel()} · 暂停对轴`;
+    ui.syncBadge.classList.remove('good');
+    if (snapshot.playing) setProgrammaticPlay();
+    else setProgrammaticPause();
+    return;
+  }
+
   const decision = syncReconciler.decide({
     drift,
     desiredRate,
@@ -420,7 +451,7 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   }
 
   ui.rateSelect.value = String(desiredRate);
-  const engine = player.mode === 'libmedia' ? ' · HEVC' : '';
+  const engine = player.mode === 'libmedia' ? ' · 兼容' : '';
   if (state.buffering) ui.syncBadge.textContent = `缓冲中${engine} · 差 ${absDrift.toFixed(1)}s`;
   else if (absDrift <= 0.4) ui.syncBadge.textContent = `已对轴${engine}`;
   else if (absDrift < 1.2) ui.syncBadge.textContent = `同步稳定${engine} · 差 ${absDrift.toFixed(1)}s`;
@@ -440,23 +471,149 @@ function refreshActiveLibraryItem() {
   }
 }
 
+function clearRecoveryTimers() {
+  clearTimeout(state.recoveryCheckTimer);
+  clearTimeout(state.recoveryReloadTimer);
+  state.recoveryCheckTimer = null;
+  state.recoveryReloadTimer = null;
+}
+
+function setBuffering(value) {
+  const next = Boolean(value);
+  if (state.buffering === next) return;
+  state.buffering = next;
+  syncReconciler.setBuffering(next);
+  if (next) clearCorrection(true);
+  ui.selfBuffering.textContent = localMediaStatus();
+  if (state.socket?.connected) state.socket.emit('presence:buffering', { buffering: next });
+  if (!next) requestSync(false);
+}
+
+function scheduleRecoveryCheck() {
+  clearTimeout(state.recoveryCheckTimer);
+  const tick = () => {
+    state.recoveryCheckTimer = null;
+    const status = mediaRecovery.stallStatus();
+    if (!['stalled', 'recovering'].includes(status.phase)) return;
+    if (status.shouldShareBuffering) setBuffering(true);
+    if (status.shouldReload) {
+      scheduleMediaReload('stall');
+      return;
+    }
+    state.recoveryCheckTimer = setTimeout(tick, 300);
+  };
+  state.recoveryCheckTimer = setTimeout(tick, 300);
+}
+
+function beginMediaStall() {
+  if (!state.mediaPath || state.sourceLoading || player.paused || player.seeking) return;
+  const started = mediaRecovery.beginStall({ position: player.currentTime });
+  if (started.ignored) return;
+  clearCorrection(true);
+  ui.syncBadge.textContent = '检测到媒体卡顿';
+  ui.syncBadge.classList.remove('good');
+  scheduleRecoveryCheck();
+}
+
+function markMediaPlayable() {
+  if (!state.mediaPath || !player.hasRenderedFrame) return;
+  const result = mediaRecovery.markPlayable();
+  if (result.clearSharedBuffering && state.buffering && player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+    setBuffering(false);
+    setNotice('媒体重新可播放，连续稳定播放后再恢复自动对轴。');
+  }
+}
+
+function handleMediaProgress() {
+  if (!state.mediaPath || !player.hasRenderedFrame) return;
+  const result = mediaRecovery.noteProgress({
+    position: player.currentTime,
+    readyState: player.readyState,
+    paused: player.paused,
+    seeking: player.seeking || state.seeking,
+  });
+  if (result.recovered) {
+    clearRecoveryTimers();
+    setBuffering(false);
+    clearCorrection(false);
+    setNotice(player.mode === 'libmedia'
+      ? '兼容播放器已稳定播放；已恢复自动对轴。'
+      : '播放已稳定；已恢复自动对轴。');
+    requestSync(true);
+  }
+}
+
+function scheduleMediaReload(reason = 'network') {
+  if (!state.mediaPath || state.recoveryReloadTimer) return;
+  const retry = mediaRecovery.nextRetry();
+  if (!retry) {
+    clearRecoveryTimers();
+    setBuffering(false);
+    setNotice('媒体连接多次恢复失败，已停止自动重载，避免无限循环。可以重新选片或刷新页面后再试。', true);
+    ui.syncBadge.textContent = '媒体恢复失败';
+    return;
+  }
+  setBuffering(true);
+  setNotice(`媒体连接异常，${(retry.delayMs / 1000).toFixed(1)} 秒后进行第 ${retry.attempt}/${retry.maxAttempts} 次恢复…`);
+  state.recoveryReloadTimer = setTimeout(() => {
+    state.recoveryReloadTimer = null;
+    reloadCurrentMedia(reason);
+  }, retry.delayMs);
+}
+
+function reloadCurrentMedia(reason = 'network') {
+  if (!state.mediaPath) return;
+  const target = state.lastSnapshot ? targetPosition(state.lastSnapshot) : Number(player.currentTime || 0);
+  const seq = ++state.loadSeq;
+  state.sourceLoading = true;
+  state.mediaReady = false;
+  clearCorrection(false);
+  mediaRecovery.markReloadStarted(Date.now(), target);
+  ui.syncBadge.textContent = '正在恢复媒体';
+  setNotice(`正在重新建立 123 媒体读取连接（${reason === 'stall' ? '持续卡顿' : '网络错误'}）…`);
+
+  player.pause();
+  player.removeAttribute('src');
+  player.src = `/api/media?path=${encodeURIComponent(state.mediaPath)}&v=${state.mediaVersion}&recover=${Date.now()}`;
+  player.load();
+
+  const onMetadata = () => {
+    player.removeEventListener('loadedmetadata', onMetadata);
+    if (seq !== state.loadSeq) return;
+    state.sourceLoading = false;
+    state.mediaReady = true;
+    mediaRecovery.markReloadMetadata();
+    if (Number.isFinite(target) && target > 0.05) setProgrammaticSeek(target);
+    requestSync(false);
+    scheduleRecoveryCheck();
+  };
+  player.addEventListener('loadedmetadata', onMetadata);
+}
+
 player.addEventListener('fallbackstart', () => {
   if (!state.mediaPath) return;
-  ui.syncBadge.textContent = '切换 HEVC 兼容模式';
+  ui.syncBadge.textContent = '切换兼容模式';
   ui.syncBadge.classList.remove('good');
-  setNotice('原生播放器无法解码，正在启动 HEVC 兼容播放器…');
+  setNotice('原生播放器无法解码，正在启动非 Safari 兼容播放器…');
 });
 
 player.addEventListener('fallbackready', () => {
   if (!state.mediaPath) return;
-  ui.syncBadge.textContent = 'HEVC 兼容模式';
-  ui.syncBadge.classList.remove('good');
-  setNotice('HEVC 兼容播放器已完成解析，等待首帧。');
+  ui.syncBadge.textContent = '兼容模式已解析';
+  setNotice('兼容播放器已完成解析，等待首帧。');
+});
+
+player.addEventListener('fallbackunavailable', () => {
+  state.fallbackUnavailable = true;
 });
 
 player.addEventListener('firstrender', () => {
-  if (!state.mediaPath || player.mode !== 'libmedia') return;
-  setNotice('HEVC 兼容播放器已开始渲染；视频仍直接从 123 获取。');
+  if (!state.mediaPath) return;
+  mediaRecovery.markRendered(player.currentTime);
+  ui.selfBuffering.textContent = localMediaStatus();
+  if (player.mode === 'libmedia') setNotice('兼容播放器已输出首帧。');
+  else setNotice('视频首帧已就绪。');
+  requestSync(true);
 });
 
 player.addEventListener('play', () => {
@@ -470,11 +627,15 @@ player.addEventListener('pause', () => {
   if (Date.now() <= state.expectedPauseUntil) { state.expectedPauseUntil = 0; return; }
   if (state.seeking || player.seeking) return;
   if (player.ended || !state.mediaPath) return;
+  clearRecoveryTimers();
+  mediaRecovery.cancelStall({ keepAttempts: true });
+  setBuffering(false);
   emitControl('player:pause', mediaPayload({ position: player.currentTime }));
 });
 
 player.addEventListener('seeking', () => {
   state.seeking = true;
+  mediaRecovery.invalidateStability();
 });
 
 player.addEventListener('seeked', () => {
@@ -503,52 +664,47 @@ player.addEventListener('ratechange', () => {
 });
 
 player.addEventListener('ended', () => {
+  clearRecoveryTimers();
+  mediaRecovery.cancelStall({ keepAttempts: false });
+  setBuffering(false);
   if (state.mediaPath) emitControl('player:pause', mediaPayload({ position: player.duration || player.currentTime }));
 });
 
-function setBuffering(value) {
-  const next = Boolean(value);
-  if (state.buffering === next) return;
-  state.buffering = next;
-  syncReconciler.setBuffering(next);
-  if (next) clearCorrection(true);
-  ui.selfBuffering.textContent = next ? '正在缓冲' : '播放就绪';
-  if (state.socket?.connected) state.socket.emit('presence:buffering', { buffering: next });
-  if (!next) requestSync(false);
-}
-
-function beginBuffering() {
-  if (player.paused || !state.mediaPath) return;
-  clearTimeout(state.bufferTimer);
-  state.bufferTimer = setTimeout(() => setBuffering(true), 500);
-}
-
-function endBuffering() {
-  clearTimeout(state.bufferTimer);
-  setBuffering(false);
-}
-
-player.addEventListener('waiting', beginBuffering);
-player.addEventListener('stalled', beginBuffering);
-player.addEventListener('playing', endBuffering);
-player.addEventListener('canplay', endBuffering);
-player.addEventListener('loadeddata', endBuffering);
+player.addEventListener('waiting', beginMediaStall);
+player.addEventListener('stalled', beginMediaStall);
+player.addEventListener('playing', markMediaPlayable);
+player.addEventListener('canplay', markMediaPlayable);
+player.addEventListener('loadeddata', markMediaPlayable);
 player.addEventListener('progress', () => {
-  if (state.buffering && player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
+  if (state.buffering && player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) markMediaPlayable();
 });
+player.addEventListener('timeupdate', handleMediaProgress);
+
 player.addEventListener('error', () => {
   if (!state.mediaPath) return;
+  const code = player.error?.code;
+  if (code === MediaError.MEDIA_ERR_NETWORK) {
+    state.sourceLoading = false;
+    state.mediaReady = false;
+    mediaRecovery.beginStall({ position: player.currentTime });
+    scheduleMediaReload('network');
+    return;
+  }
+
+  clearRecoveryTimers();
+  setBuffering(false);
   state.sourceLoading = false;
   state.mediaReady = false;
-  endBuffering();
-  const code = player.error?.code;
-  const message = player.mode === 'libmedia'
-    ? `原生播放器和 HEVC 兼容播放器都无法播放该视频${player.error?.message ? `：${player.error.message}` : '。'} 请查看下方媒体诊断。`
+  const safariMessage = state.fallbackUnavailable
+    ? 'Safari 原生媒体管线无法播放该文件。3.0 已禁用会黑屏/无声的 libmedia Safari fallback；请查看媒体诊断确认 HEVC 封装/Codec。'
+    : '';
+  const message = safariMessage || (player.mode === 'libmedia'
+    ? `原生播放器和兼容播放器都无法播放该视频${player.error?.message ? `：${player.error.message}` : '。'}`
     : (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-      ? '浏览器无法播放该视频，正在尝试 HEVC 兼容播放器；若兼容播放器也失败，请查看媒体诊断。'
-      : '视频读取失败。请先检查 WebDAV 和 123 下载节点是否可访问。');
+      ? '浏览器无法播放该视频，请查看媒体诊断。'
+      : '视频读取或解码失败，请查看媒体诊断。'));
   setNotice(message, true);
-  ui.syncBadge.textContent = player.mode === 'libmedia' ? 'HEVC 兼容播放失败' : '播放失败';
+  ui.syncBadge.textContent = '播放失败';
   ui.syncBadge.classList.remove('good');
 });
 
@@ -622,7 +778,7 @@ ui.saveWebdavBtn.addEventListener('click', async () => {
     applySettings(result.settings);
     state.libraryPath = '';
     await loadLibrary('');
-    setSettingsNotice('WebDAV 已保存。视频由浏览器直接读取 123；服务器不代理视频数据。');
+    setSettingsNotice('WebDAV 已保存。视频仍由浏览器直接读取 123，服务器不代理视频正文。');
   } catch (error) { setSettingsNotice(error.message, true); }
   finally { ui.saveWebdavBtn.disabled = false; }
 });
