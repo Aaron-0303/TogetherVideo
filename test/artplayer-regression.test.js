@@ -38,17 +38,17 @@ test('3.2.1 assigns the same-origin logical media URL only after the worker cont
 });
 
 test('MIME bridge forwards native Range unchanged and never slices it', () => {
-  assert.match(serverSource, /const range = request\.headers\.get\('range'\)/);
-  assert.match(serverSource, /if \(range\) headers\.set\('Range', range\)/);
-  assert.doesNotMatch(serverSource, /RANGE_CHUNK_BYTES/);
-  assert.doesNotMatch(serverSource, /boundedMediaRange/);
+  assert.match(routesSource, /const range = request\.headers\.get\('range'\)/);
+  assert.match(routesSource, /if \(range\) headers\.set\('Range', range\)/);
+  assert.doesNotMatch(routesSource, /RANGE_CHUNK_BYTES/);
+  assert.doesNotMatch(routesSource, /boundedMediaRange/);
 });
 
 test('MIME bridge repairs 123 download headers without proxying through Node', () => {
-  assert.match(serverSource, /headers\.set\('Content-Type', mimeForPath\(mediaPath\)\)/);
-  assert.match(serverSource, /headers\.set\('Content-Disposition', 'inline'\)/);
-  assert.match(serverSource, /headers\.set\('Accept-Ranges', 'bytes'\)/);
-  assert.match(serverSource, /X-TogetherVideo-Media-Mode', 'mime-bridge'/);
+  assert.match(routesSource, /headers\.set\('Content-Type', mimeForPath\(mediaPath\)\)/);
+  assert.match(routesSource, /headers\.set\('Content-Disposition', 'inline'\)/);
+  assert.match(routesSource, /headers\.set\('Accept-Ranges', 'bytes'\)/);
+  assert.match(routesSource, /X-TogetherVideo-Media-Mode', 'mime-bridge'/);
   assert.match(serverSource, /media bytes are never proxied by this server/);
 });
 
