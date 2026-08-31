@@ -139,13 +139,23 @@ test('WebDAV auth is not forwarded to an unrelated redirect host', async (t) => 
   );
 });
 
-test('authenticated playback returns provider redirect without exposing credentials', async (t) => {
+test('authenticated playback resolves and verifies the final anonymous provider URL', async (t) => {
   const originalFetch = global.fetch;
   t.after(() => { global.fetch = originalFetch; });
-  global.fetch = async (_url, options) => {
+  const requests = [];
+
+  global.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
     assert.equal(options.redirect, 'manual');
-    assert.match(options.headers.Authorization, /^Basic /);
-    return new Response(null, { status: 302, headers: { location: 'https://cdn.example.com/signed/video.mp4' } });
+    if (requests.length === 1) {
+      assert.match(options.headers.Authorization, /^Basic /);
+      return new Response(null, { status: 302, headers: { location: 'https://cdn.example.com/signed/video.mp4' } });
+    }
+    assert.equal(options.headers.Authorization, undefined);
+    return new Response(null, {
+      status: 200,
+      headers: { 'content-type': 'video/mp4', 'accept-ranges': 'bytes' },
+    });
   };
 
   const client = new WebDavClient({
@@ -156,15 +166,61 @@ test('authenticated playback returns provider redirect without exposing credenti
   });
   const result = await client.resolvePlayable('Show/E01.mp4');
   assert.equal(result.url, 'https://cdn.example.com/signed/video.mp4');
-  assert.equal(result.strategy, 'webdav-redirect');
+  assert.equal(result.strategy, 'webdav-final-direct');
   assert.equal(result.url.includes('user@example.com'), false);
   assert.equal(result.url.includes('app-pass'), false);
+  assert.equal(requests.length, 2);
 });
 
-test('authenticated WebDAV without a redirect is rejected instead of proxied', async (t) => {
+test('123pan media chain keeps auth only on trusted WebDAV nodes', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  const requests = [];
+
+  global.fetch = async (url, options) => {
+    requests.push({ url: String(url), auth: options.headers.Authorization, method: options.method });
+    if (requests.length === 1) {
+      assert.match(options.headers.Authorization, /^Basic /);
+      return new Response(null, {
+        status: 307,
+        headers: { location: 'https://webdav-demo.pd1.123pan.cn/webdav/TV/movie.mp4' },
+      });
+    }
+    if (requests.length === 2) {
+      assert.match(options.headers.Authorization, /^Basic /);
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://download.example-cdn.com/token/movie.mp4' },
+      });
+    }
+    assert.equal(options.headers.Authorization, undefined);
+    return new Response(null, {
+      status: 206,
+      headers: {
+        'content-type': 'video/mp4',
+        'accept-ranges': 'bytes',
+        'content-range': 'bytes 0-0/1000000',
+      },
+    });
+  };
+
+  const client = new WebDavClient({
+    url: 'https://webdav.123pan.cn/webdav',
+    username: 'example-user',
+    password: 'example-app-password',
+    root: '/',
+  });
+  const result = await client.resolvePlayable('movie.mp4');
+  assert.equal(result.url, 'https://download.example-cdn.com/token/movie.mp4');
+  assert.equal(requests.length, 3);
+});
+
+test('authenticated WebDAV without an anonymous final URL is rejected instead of proxied', async (t) => {
   const originalFetch = global.fetch;
   t.after(() => { global.fetch = originalFetch; });
   global.fetch = async (_url, options) => {
+    const authenticated = Boolean(options.headers.Authorization);
+    if (!authenticated) return new Response(null, { status: 401 });
     if (options.method === 'HEAD') return new Response(null, { status: 200 });
     return new Response('x', { status: 206, headers: { 'content-range': 'bytes 0-0/100' } });
   };
