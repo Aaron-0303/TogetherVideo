@@ -1,7 +1,7 @@
 /* TogetherVideo browser-local media bridge.
  * Video bytes flow directly from the provider CDN to this browser.
- * The TogetherVideo server only resolves short-lived provider URLs; it never
- * receives, proxies, buffers, or caches media bytes.
+ * The TogetherVideo server still only resolves a redirect; it never receives,
+ * proxies, buffers, or caches media bytes.
  */
 const SOURCE_TTL_MS = 120000;
 const sourceCache = new Map();
@@ -9,7 +9,7 @@ const sourceCache = new Map();
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
-function mimeForPath(mediaPath, fallback = '') {
+function mimeForPath(mediaPath) {
   const clean = String(mediaPath || '').split('?')[0].toLowerCase();
   if (clean.endsWith('.mp4')) return 'video/mp4';
   if (clean.endsWith('.m4v')) return 'video/x-m4v';
@@ -17,32 +17,46 @@ function mimeForPath(mediaPath, fallback = '') {
   if (clean.endsWith('.webm')) return 'video/webm';
   if (clean.endsWith('.ogv') || clean.endsWith('.ogg')) return 'video/ogg';
   if (clean.endsWith('.mkv')) return 'video/x-matroska';
-  return fallback || 'application/octet-stream';
+  return 'application/octet-stream';
 }
 
-async function resolveSource(mediaPath, fresh = false) {
+async function resolveProviderUrl(mediaPath, fresh = false) {
   const now = Date.now();
   const cached = sourceCache.get(mediaPath);
   if (!fresh && cached && cached.expiresAt > now) return cached;
 
-  const endpoint = new URL('/api/media/source', self.location.origin);
-  endpoint.searchParams.set('path', mediaPath);
-  if (fresh) endpoint.searchParams.set('fresh', '1');
+  // Reuse the existing no-proxy /api/media route. The private marker prevents
+  // this Service Worker from intercepting its own one-byte resolver request.
+  const resolver = new URL('/api/media', self.location.origin);
+  resolver.searchParams.set('path', mediaPath);
+  resolver.searchParams.set('_swresolve', '1');
+  if (fresh) resolver.searchParams.set('_fresh', String(now));
 
-  const response = await fetch(endpoint, {
+  const response = await fetch(resolver, {
     method: 'GET',
-    credentials: 'include',
+    credentials: 'same-origin',
+    redirect: 'follow',
     cache: 'no-store',
-    headers: { Accept: 'application/json' },
+    headers: { Range: 'bytes=0-0' },
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.ok === false || !data.source?.url) {
-    throw new Error(data.error || `media source HTTP ${response.status}`);
+
+  // The resolver follows TogetherVideo's 307 in this browser, so the final URL
+  // is the provider/CDN URL and at most one media byte is requested from it.
+  if (!(response.ok || response.status === 206) || !response.url) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`media resolver HTTP ${response.status}`);
   }
 
+  const finalUrl = new URL(response.url);
+  if (finalUrl.origin === self.location.origin) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error('media resolver did not reach provider');
+  }
+
+  await response.body?.cancel().catch(() => {});
   const source = {
-    url: String(data.source.url),
-    mime: mimeForPath(mediaPath, data.source.mime || ''),
+    url: finalUrl.toString(),
+    mime: mimeForPath(mediaPath),
     expiresAt: now + SOURCE_TTL_MS,
   };
   sourceCache.set(mediaPath, source);
@@ -51,9 +65,8 @@ async function resolveSource(mediaPath, fresh = false) {
 
 async function providerFetch(request, source) {
   const headers = new Headers();
-  // Preserve the browser's exact single-range request. If the browser starts
-  // without one, request bytes=0- so the provider still returns a range-aware
-  // 206 response suitable for Safari media loading.
+  // Preserve Safari/Chrome's exact Range. If the first media request contains no
+  // Range, bytes=0- still forces the provider into its known-good 206 path.
   headers.set('Range', request.headers.get('range') || 'bytes=0-');
 
   return fetch(source.url, {
@@ -68,8 +81,9 @@ async function providerFetch(request, source) {
 
 function browserMediaResponse(upstream, mime) {
   const headers = new Headers();
-  const copy = ['content-range', 'content-length', 'accept-ranges', 'etag', 'last-modified'];
-  for (const name of copy) {
+  // Only copy media-safe headers. In particular we intentionally do not copy
+  // Content-Disposition: attachment or X-Content-Type-Options: nosniff.
+  for (const name of ['content-range', 'content-length', 'accept-ranges', 'etag', 'last-modified']) {
     const value = upstream.headers.get(name);
     if (value) headers.set(name, value);
   }
@@ -92,19 +106,20 @@ async function handleMedia(request, requestUrl) {
   if (!mediaPath) return new Response('Missing media path', { status: 400 });
 
   try {
-    let source = await resolveSource(mediaPath, false);
+    let source = await resolveProviderUrl(mediaPath, false);
     let upstream = await providerFetch(request, source);
 
-    // Signed provider URLs can expire during a long movie. Resolve a fresh URL
-    // once and retry the exact browser Range instead of failing playback.
+    // Long movies may outlive a signed CDN URL. Resolve once more and repeat the
+    // exact Range instead of pushing an expired URL back to the <video> element.
     if (upstream.status === 401 || upstream.status === 403) {
       await upstream.body?.cancel().catch(() => {});
       sourceCache.delete(mediaPath);
-      source = await resolveSource(mediaPath, true);
+      source = await resolveProviderUrl(mediaPath, true);
       upstream = await providerFetch(request, source);
     }
 
     if (!(upstream.ok || upstream.status === 206)) {
+      await upstream.body?.cancel().catch(() => {});
       return new Response(`Provider media HTTP ${upstream.status}`, {
         status: upstream.status || 502,
         headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
@@ -122,7 +137,8 @@ async function handleMedia(request, requestUrl) {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || url.pathname !== '/__media/stream') return;
+  if (url.origin !== self.location.origin || url.pathname !== '/api/media') return;
+  if (url.searchParams.has('_swresolve')) return;
   if (event.request.method !== 'GET') return;
   event.respondWith(handleMedia(event.request, url));
 });
