@@ -34,6 +34,8 @@ function defaultState() {
 
 function effectivePosition(state, now = Date.now()) {
   if (!state.playing || !state.anchorAt) return Math.max(0, Number(state.position || 0));
+  // anchorAt may deliberately be in the future. This is how 3.1 schedules both
+  // browsers to start from the same media position at the same server time.
   const elapsed = Math.max(0, now - Number(state.anchorAt || now)) / 1000;
   return Math.max(0, Number(state.position || 0) + elapsed * Number(state.rate || 1));
 }
@@ -51,18 +53,26 @@ class WatchRoom {
     try {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8'));
       this.state = { ...defaultState(), ...(parsed || {}) };
-      if (parsed?.media && parsed.media.path) this.state.media = { path: cleanMediaPath(parsed.media.path), name: cleanText(parsed.media.name) };
+      if (parsed?.media && parsed.media.path) {
+        this.state.media = {
+          path: cleanMediaPath(parsed.media.path),
+          name: cleanText(parsed.media.name),
+        };
+      }
       if (!isUserPlaybackRate(this.state.rate)) this.state.rate = 1;
     } catch (error) {
       if (error.code !== 'ENOENT') console.warn('[room] resetting invalid watch state:', error.message);
     }
+
+    // Never resume an old process' running clock blindly after restart. Resume
+    // from a conservative saved point and require a new user/barrier start.
     if (this.state.playing) {
       const cappedNow = Math.min(Date.now(), Number(this.state.anchorAt || 0) + 30000);
       this.state.position = effectivePosition(this.state, cappedNow);
       this.state.playing = false;
       this.state.anchorAt = 0;
       this.state.reason = 'server-restart';
-      this.state.revision++;
+      this.state.revision += 1;
     }
     await this.save();
   }
@@ -85,15 +95,18 @@ class WatchRoom {
   }
 
   snapshot(now = Date.now()) {
+    const anchorAt = Number(this.state.anchorAt || 0);
     return {
       media: this.state.media ? { ...this.state.media } : null,
       mediaVersion: Number(this.state.mediaVersion || 0),
       playing: Boolean(this.state.playing),
       position: effectivePosition(this.state, now),
       rate: Number(this.state.rate || 1),
+      startAt: this.state.playing && anchorAt > now ? anchorAt : 0,
       revision: Number(this.state.revision || 0),
       updatedBy: this.state.updatedBy || '',
       reason: this.state.reason || '',
+      serverNow: now,
     };
   }
 
@@ -111,7 +124,10 @@ class WatchRoom {
     if (action === 'select') {
       const mediaPath = cleanMediaPath(payload.mediaPath);
       if (!mediaPath) return null;
-      this.state.media = { path: mediaPath, name: cleanText(payload.mediaName) || path.posix.basename(mediaPath) };
+      this.state.media = {
+        path: mediaPath,
+        name: cleanText(payload.mediaName) || path.posix.basename(mediaPath),
+      };
       this.state.mediaVersion = Number(this.state.mediaVersion || 0) + 1;
       this.state.playing = false;
       this.state.position = 0;
@@ -131,23 +147,42 @@ class WatchRoom {
       this.state.position = effectivePosition(this.state, now);
       this.state.playing = false;
       this.state.anchorAt = 0;
-      this.state.reason = 'wait';
+      this.state.reason = String(payload.reason || 'wait').slice(0, 40);
     } else {
       if (!this.matchesMedia(payload)) return null;
+
       if (action === 'play') {
-        this.state.position = Number.isFinite(position) ? Math.max(0, position) : effectivePosition(this.state, now);
+        const requestedStart = Number(payload.startAt);
+        // A scheduled start only needs a short runway for network/UI jitter.
+        const startAt = Number.isFinite(requestedStart)
+          ? Math.min(now + 5000, Math.max(now, requestedStart))
+          : now;
+        this.state.position = Number.isFinite(position)
+          ? Math.max(0, position)
+          : effectivePosition(this.state, now);
         this.state.playing = true;
-        this.state.anchorAt = now;
-        this.state.reason = 'play';
+        this.state.anchorAt = startAt;
+        this.state.reason = String(payload.reason || 'play').slice(0, 40);
       } else if (action === 'pause') {
-        this.state.position = Number.isFinite(position) ? Math.max(0, position) : effectivePosition(this.state, now);
+        this.state.position = Number.isFinite(position)
+          ? Math.max(0, position)
+          : effectivePosition(this.state, now);
         this.state.playing = false;
         this.state.anchorAt = 0;
-        this.state.reason = 'pause';
-      } else if (action === 'seek') {
+        this.state.reason = String(payload.reason || 'pause').slice(0, 40);
+      } else if (action === 'prepare') {
         if (!Number.isFinite(position)) return null;
         this.state.position = Math.max(0, position);
-        if (this.state.playing) this.state.anchorAt = now;
+        this.state.playing = false;
+        this.state.anchorAt = 0;
+        this.state.reason = String(payload.reason || 'prepare').slice(0, 40);
+      } else if (action === 'seek') {
+        // Kept for compatibility with old persisted/tests. The 3.1 gateway uses
+        // `prepare` so a seek is always a pause-and-ready barrier, never a live jump.
+        if (!Number.isFinite(position)) return null;
+        this.state.position = Math.max(0, position);
+        this.state.playing = false;
+        this.state.anchorAt = 0;
         this.state.reason = 'seek';
       } else if (action === 'rate') {
         const rate = Number(payload.rate);
@@ -168,4 +203,10 @@ class WatchRoom {
   }
 }
 
-module.exports = { WatchRoom, effectivePosition, cleanMediaPath, isUserPlaybackRate, USER_PLAYBACK_RATES };
+module.exports = {
+  WatchRoom,
+  effectivePosition,
+  cleanMediaPath,
+  isUserPlaybackRate,
+  USER_PLAYBACK_RATES,
+};
