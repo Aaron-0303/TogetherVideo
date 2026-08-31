@@ -1,4 +1,4 @@
-/* TogetherVideo sync policy: conservative, hysteresis-based reconciliation. */
+/* TogetherVideo sync policy: tight, symmetric, hysteresis-based reconciliation. */
 (function attachSyncPolicy(root, factory) {
   const api = factory();
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -8,12 +8,15 @@
     rttWindow: 9,
     rttKeepRatio: 0.6,
     maxHalfRttMs: 400,
-    settledDrift: 0.6,
-    softDrift: 1.2,
-    hardDrift: 3.5,
-    stableSamples: 3,
-    correctionDelta: 0.02,
-    afterBufferSoftDelayMs: 5000,
+    settledDrift: 0.22,
+    softDrift: 0.4,
+    hardDrift: 3.0,
+    stableSamples: 2,
+    hardStableSamples: 3,
+    minCorrectionDelta: 0.012,
+    maxCorrectionDelta: 0.06,
+    correctionGain: 0.04,
+    afterBufferSoftDelayMs: 3000,
     afterBufferHardDelayMs: 8000,
     hardSeekCooldownMs: 15000,
   });
@@ -28,6 +31,7 @@
       this.rttSamples = [];
       this.driftSamples = [];
       this.correctionActive = false;
+      this.correctionSign = 0;
       this.lastHardSeekAt = 0;
       this.lastBufferEndAt = 0;
       this.buffering = false;
@@ -54,14 +58,17 @@
       const next = Boolean(value);
       if (this.buffering && !next) this.lastBufferEndAt = now;
       this.buffering = next;
-      if (next) {
-        this.resetDrift();
-        this.correctionActive = false;
-      }
+      if (next) this.stopCorrection();
     }
 
     resetDrift() {
       this.driftSamples = [];
+    }
+
+    stopCorrection() {
+      this.resetDrift();
+      this.correctionActive = false;
+      this.correctionSign = 0;
     }
 
     sampleDrift(drift) {
@@ -74,14 +81,27 @@
       const previous = this.driftSamples[this.driftSamples.length - 1];
       if (previous != null && Math.sign(previous) !== sign) this.resetDrift();
       this.driftSamples.push(value);
-      while (this.driftSamples.length > this.options.stableSamples + 2) this.driftSamples.shift();
+      while (this.driftSamples.length > this.options.hardStableSamples + 2) this.driftSamples.shift();
       return this.driftSamples.length;
+    }
+
+    correctionRate(drift, desiredRate) {
+      const abs = Math.abs(Number(drift || 0));
+      const delta = clamp(
+        abs * this.options.correctionGain,
+        this.options.minCorrectionDelta,
+        this.options.maxCorrectionDelta,
+      );
+      return clamp(
+        drift < 0 ? desiredRate + delta : desiredRate - delta,
+        0.25,
+        4,
+      );
     }
 
     noteHardSeek(now = Date.now()) {
       this.lastHardSeekAt = now;
-      this.resetDrift();
-      this.correctionActive = false;
+      this.stopCorrection();
     }
 
     decide({
@@ -96,31 +116,29 @@
     } = {}) {
       const value = Number(drift || 0);
       const abs = Math.abs(value);
+      const sign = Math.sign(value);
       const rate = clamp(Number(desiredRate || 1), 0.25, 4);
       const sinceBuffer = this.lastBufferEndAt ? now - this.lastBufferEndAt : Number.POSITIVE_INFINITY;
       const sinceHardSeek = this.lastHardSeekAt ? now - this.lastHardSeekAt : Number.POSITIVE_INFINITY;
 
       // A buffering decoder should never be forced to seek merely because the
-      // shared timeline was paused. Let it fill its buffer first; when it reports
-      // ready it can align once while the room is still paused.
+      // shared timeline was paused. Let it fill first and align after recovery.
       if (buffering && !force && reason !== 'seek') {
-        this.resetDrift();
-        this.correctionActive = false;
+        this.stopCorrection();
         return { action: 'hold', rate, absDrift: abs, stableSamples: 0 };
       }
 
       if (force || reason === 'seek' || (!playing && abs > 0.2)) {
-        this.resetDrift();
-        this.correctionActive = false;
+        this.stopCorrection();
         return { action: abs > 0.2 ? 'seek' : 'normal', rate, absDrift: abs, stableSamples: 0 };
       }
 
       if (reason === 'rate') {
-        this.resetDrift();
-        this.correctionActive = false;
+        this.stopCorrection();
         return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
       }
 
+      // Push events are applied immediately but do not count as drift samples.
       if (!sampled) {
         return {
           action: this.correctionActive ? 'preserve' : 'observe',
@@ -130,28 +148,47 @@
         };
       }
 
+      // Hysteresis: once correction starts, continue until the tighter settled
+      // threshold is reached. This prevents a stable ~0.5-1.5 s residual gap.
+      if (this.correctionActive) {
+        if (abs <= this.options.settledDrift || (this.correctionSign && sign !== this.correctionSign)) {
+          this.stopCorrection();
+          return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
+        }
+        if (sinceBuffer < this.options.afterBufferSoftDelayMs) {
+          this.stopCorrection();
+          return { action: 'observe', rate, absDrift: abs, stableSamples: 0 };
+        }
+        return {
+          action: 'rate',
+          rate: this.correctionRate(value, rate),
+          baseRate: rate,
+          absDrift: abs,
+          stableSamples: this.driftSamples.length,
+        };
+      }
+
       if (abs <= this.options.settledDrift) {
-        this.resetDrift();
-        this.correctionActive = false;
+        this.stopCorrection();
         return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
       }
 
       if (sinceBuffer < this.options.afterBufferSoftDelayMs) {
-        this.resetDrift();
-        this.correctionActive = false;
+        this.stopCorrection();
         return { action: 'observe', rate, absDrift: abs, stableSamples: 0 };
       }
 
+      // 0.22-0.40 s is intentionally a dead band: visible sync is already good
+      // and no playback-rate changes are worth introducing here.
       if (abs < this.options.softDrift) {
         this.resetDrift();
-        this.correctionActive = false;
         return { action: 'normal', rate, absDrift: abs, stableSamples: 0 };
       }
 
       const stableSamples = this.sampleDrift(value);
       if (
         abs >= this.options.hardDrift
-        && stableSamples >= this.options.stableSamples
+        && stableSamples >= this.options.hardStableSamples
         && sinceBuffer >= this.options.afterBufferHardDelayMs
         && sinceHardSeek >= this.options.hardSeekCooldownMs
       ) {
@@ -160,13 +197,15 @@
       }
 
       if (stableSamples >= this.options.stableSamples) {
-        const correctedRate = clamp(
-          value < 0 ? rate + this.options.correctionDelta : rate - this.options.correctionDelta,
-          0.25,
-          4,
-        );
         this.correctionActive = true;
-        return { action: 'rate', rate: correctedRate, baseRate: rate, absDrift: abs, stableSamples };
+        this.correctionSign = sign;
+        return {
+          action: 'rate',
+          rate: this.correctionRate(value, rate),
+          baseRate: rate,
+          absDrift: abs,
+          stableSamples,
+        };
       }
 
       return { action: 'observe', rate, absDrift: abs, stableSamples };
