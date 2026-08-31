@@ -89,6 +89,16 @@
       this._emit('interactionrequired', detail);
     }
 
+    _markFirstFrame() {
+      if (this.avFirstFrame) return;
+      this.avFirstFrame = true;
+      this.avStalled = false;
+      this.avResizeHandler?.();
+      this._emit('loadeddata');
+      this._emit('firstrender');
+      this._emit('canplay');
+    }
+
     _bindNative() {
       if (!this.video) return;
       const passthrough = [
@@ -245,17 +255,13 @@
         this.avEnded = false;
         this._updateControls();
         this.avResizeHandler?.();
+        // Parsing/demux metadata is complete, but there may still be no rendered
+        // frame. Keep readyState at HAVE_METADATA until first video output.
         this._emit('loadedmetadata');
-        this._emit('loadeddata');
-        this._emit('canplay');
       });
       player.on(Events.FIRST_VIDEO_RENDERED, () => {
         if (!active()) return;
-        this.avFirstFrame = true;
-        this.avStalled = false;
-        this.avResizeHandler?.();
-        this._emit('firstrender');
-        this._emit('canplay');
+        this._markFirstFrame();
       });
       player.on(Events.PLAYING, () => {
         if (!active()) return;
@@ -274,9 +280,11 @@
       player.on(Events.SEEKING, () => {
         if (!active()) return;
         this.avSeeking = true;
-        this.avStalled = true;
+        if (this.avFirstFrame) {
+          this.avStalled = true;
+          this._emit('waiting');
+        }
         this._emit('seeking');
-        this._emit('waiting');
       });
       player.on(Events.SEEKED, () => {
         if (!active()) return;
@@ -291,6 +299,9 @@
         this.avCurrentTime = next;
         this._updateControls();
         this._emit('timeupdate');
+        // MSE playback may not emit FIRST_VIDEO_RENDERED through the canvas path;
+        // a progressing media clock proves the native MSE element is rendering.
+        if (!this.avFirstFrame && progressed) this._markFirstFrame();
         if (this.avStalled && progressed && !this.avSeeking) {
           this.avStalled = false;
           this._emit('canplay');
@@ -302,6 +313,9 @@
       });
       player.on(Events.TIMEOUT, () => {
         if (!active()) return;
+        // Initial decoder preparation must not trigger the shared room pause;
+        // only starvation after a real rendered frame counts as buffering.
+        if (!this.avFirstFrame) return;
         this.avStalled = true;
         this._emit('waiting');
         this._emit('stalled');
@@ -493,7 +507,12 @@
     get paused() { return this.mode === 'native' ? this.video.paused : this.avPaused; }
     get seeking() { return this.mode === 'native' ? this.video.seeking : this.avSeeking; }
     get ended() { return this.mode === 'native' ? this.video.ended : this.avEnded; }
-    get readyState() { return this.mode === 'native' ? this.video.readyState : (this.avLoaded ? 4 : 0); }
+    get readyState() {
+      if (this.mode === 'native') return this.video.readyState;
+      if (this.avFirstFrame) return HTMLMediaElement.HAVE_ENOUGH_DATA;
+      if (this.avLoaded) return HTMLMediaElement.HAVE_METADATA;
+      return HTMLMediaElement.HAVE_NOTHING;
+    }
     get error() { return this.mode === 'native' ? this.video.error : this.avError; }
 
     get playbackRate() {
