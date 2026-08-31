@@ -52,9 +52,6 @@ class WatchRoom {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8'));
       this.state = { ...defaultState(), ...(parsed || {}) };
       if (parsed?.media && parsed.media.path) this.state.media = { path: cleanMediaPath(parsed.media.path), name: cleanText(parsed.media.name) };
-      // Older clients could accidentally publish an internal sync-correction rate
-      // (for example 1.035x) as the room's authoritative user rate. Never restore
-      // such a value after restart: only rates exposed by the UI are authoritative.
       if (!isUserPlaybackRate(this.state.rate)) this.state.rate = 1;
     } catch (error) {
       if (error.code !== 'ENOENT') console.warn('[room] resetting invalid watch state:', error.message);
@@ -80,6 +77,10 @@ class WatchRoom {
         await fs.rename(tmp, this.file);
       })
       .catch((error) => console.error('[room] save failed:', error));
+    return this.writeChain;
+  }
+
+  flush() {
     return this.writeChain;
   }
 
@@ -150,9 +151,6 @@ class WatchRoom {
         this.state.reason = 'seek';
       } else if (action === 'rate') {
         const rate = Number(payload.rate);
-        // Internal sync correction rates are intentionally not valid room rates.
-        // This prevents a delayed browser ratechange event from turning 1.01x or
-        // 0.99x into the permanent authoritative playback speed for both viewers.
         if (!isUserPlaybackRate(rate)) return null;
         this.state.position = effectivePosition(this.state, now);
         this.state.rate = rate;

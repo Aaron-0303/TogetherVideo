@@ -1,20 +1,24 @@
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
+const { normalizeRoot } = require('./path-utils');
 
-function normalizeRoot(value) {
-  let root = String(value || '/').trim().replace(/\\/g, '/');
-  if (!root.startsWith('/')) root = `/${root}`;
-  root = path.posix.normalize(root);
-  if (root.length > 1) root = root.replace(/\/$/, '');
-  return root;
+function inputError(message, code = 'SETTINGS_INVALID_INPUT') {
+  const error = new Error(message);
+  error.status = 400;
+  error.code = code;
+  return error;
 }
 
 function normalizeWebDavUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
-  const url = new URL(raw);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('WebDAV 地址必须使用 http:// 或 https://');
+  let url;
+  try { url = new URL(raw); }
+  catch { throw inputError('WebDAV 地址格式不正确', 'WEBDAV_BAD_URL'); }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw inputError('WebDAV 地址必须使用 http:// 或 https://', 'WEBDAV_BAD_URL');
+  }
   url.hash = '';
   url.search = '';
   url.username = '';
@@ -74,6 +78,10 @@ class SettingsStore {
     return operation;
   }
 
+  flush() {
+    return this.writeChain;
+  }
+
   get sessionSecret() { return this.data.sessionSecret; }
 
   verifySitePassword(password) {
@@ -83,7 +91,7 @@ class SettingsStore {
 
   async setSitePassword(password) {
     const value = String(password || '');
-    if (value.length < 6) throw new Error('访问密码至少需要 6 个字符');
+    if (value.length < 6) throw inputError('访问密码至少需要 6 个字符', 'SITE_PASSWORD_TOO_SHORT');
     this.data.sitePasswordHash = makePasswordHash(value);
     await this.save();
   }
@@ -104,9 +112,9 @@ class SettingsStore {
 
   async setWebDav(input = {}) {
     const next = this.previewWebDav(input);
-    if (!next.url) throw new Error('请填写 WebDAV 地址');
-    if (!next.username) throw new Error('请填写 WebDAV 用户名');
-    if (!next.password) throw new Error('请填写 WebDAV 密码 / 应用密码');
+    if (!next.url) throw inputError('请填写 WebDAV 地址', 'WEBDAV_URL_REQUIRED');
+    if (!next.username) throw inputError('请填写 WebDAV 用户名', 'WEBDAV_USERNAME_REQUIRED');
+    if (!next.password) throw inputError('请填写 WebDAV 密码 / 应用密码', 'WEBDAV_PASSWORD_REQUIRED');
     this.data.webdav = next;
     await this.save();
     return this.publicSettings();

@@ -1,5 +1,5 @@
-const path = require('path');
 const { XMLParser } = require('fast-xml-parser');
+const { normalizeRoot } = require('./path-utils');
 
 class WebDavError extends Error {
   constructor(message, status = 502, code = 'WEBDAV_ERROR', details = null) {
@@ -24,16 +24,9 @@ function normalizeBaseUrl(value) {
   return url.toString().replace(/\/$/, '');
 }
 
-function normalizeRoot(value) {
-  let root = String(value || '/').trim().replace(/\\/g, '/');
-  if (!root.startsWith('/')) root = `/${root}`;
-  root = path.posix.normalize(root);
-  return root === '.' ? '/' : root;
-}
-
 function cleanRelative(value = '') {
   const raw = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
-  const normalized = path.posix.normalize(raw || '.');
+  const normalized = require('path').posix.normalize(raw || '.');
   if (normalized === '.') return '';
   if (normalized === '..' || normalized.startsWith('../')) {
     throw new WebDavError('非法 WebDAV 路径', 400, 'WEBDAV_BAD_PATH');
@@ -138,9 +131,6 @@ class WebDavClient {
   }
 
   async propfind(relativePath = '', depth = 1) {
-    // 123pan's WebDAV collection endpoint is known to work with the request
-    // shape used by curl/WebDAV clients: collection URL ending in '/', Basic
-    // Auth + Depth, and no request body (RFC 4918 allprop semantics).
     let url = this.buildUrl(relativePath);
     if (!url.endsWith('/')) url += '/';
     let response = null;
@@ -229,11 +219,6 @@ class WebDavClient {
     let useAuth = true;
     const baseHeaders = method === 'GET' ? { Range: 'bytes=0-0' } : {};
 
-    // Resolve the whole redirect chain server-side using headers only. Credentials
-    // are kept only while the request remains on the same origin or on trusted
-    // 123pan WebDAV nodes. Once the chain leaves the authenticated WebDAV area,
-    // all following probes are deliberately anonymous. This gives mobile Safari
-    // a browser-ready URL instead of an intermediate authenticated redirect.
     for (let step = 0; step < 8; step++) {
       const headers = useAuth ? this.headers(baseHeaders) : { ...baseHeaders };
       const response = await this.fetchWithTimeout(url, {
@@ -264,10 +249,6 @@ class WebDavClient {
       if (!playableStatus) return '';
 
       if (!useAuth) return url;
-
-      // An authenticated node may itself be a public signed URL. Retry that exact
-      // URL once without Authorization; only return it if a normal browser can
-      // reach it anonymously.
       useAuth = false;
     }
 

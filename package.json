@@ -1,6 +1,6 @@
 {
   "name": "together-video",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "private": true,
   "description": "A private two-person synchronized WebDAV watch room.",
   "main": "server.js",
@@ -8,7 +8,7 @@
     "start": "node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check server.js && node --check src/config.js && node --check src/settings.js && node --check src/webdav.js && node --check src/watch-room.js && node --check public/app.js && node --check public/media-transport.js && node --check public/hybrid-media.js && node --check public/media-recovery.js && node --check public/media-diagnostics.js && node --check public/sw.js && npm test"
+    "check": "node --check server.js && node --check src/config.js && node --check src/http-routes.js && node --check src/identity.js && node --check src/media-service.js && node --check src/path-utils.js && node --check src/room-coordinator.js && node --check src/settings.js && node --check src/socket-gateway.js && node --check src/watch-room.js && node --check src/webdav.js && node --check public/app.js && node --check public/media-transport.js && node --check public/hybrid-media.js && node --check public/media-recovery.js && node --check public/media-diagnostics.js && node --check public/sw.js && npm test"
   },
   "engines": { "node": ">=20" },
   "dependencies": {

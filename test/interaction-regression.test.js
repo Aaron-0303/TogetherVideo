@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const coordinatorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'room-coordinator.js'), 'utf8');
 
 test('late join uses one forced metadata catch-up and no second forced first-frame seek', () => {
   const connectBlock = appSource.match(/socket\.on\('connect',[\s\S]*?\n\s*\}\);/)?.[0] || '';
@@ -46,6 +46,6 @@ test('programmatic play and pause acknowledgements do not expire on slow Safari 
 });
 
 test('shared buffering needs sustained evidence before pausing both viewers', () => {
-  assert.match(serverSource, /BUFFERING_PAUSE_DELAY_MS\s*=\s*2500/);
-  assert.match(serverSource, /BUFFERING_RESUME_DELAY_MS\s*=\s*1000/);
+  assert.match(coordinatorSource, /pauseDelayMs = Number\(options\.pauseDelayMs \|\| 2500\)/);
+  assert.match(coordinatorSource, /resumeDelayMs = Number\(options\.resumeDelayMs \|\| 1000\)/);
 });
