@@ -4,7 +4,8 @@ const SEEK_GRACE_MS = 6000;
 const STARTUP_GRACE_MS = 7000;
 const FIRST_FRAME_GRACE_MS = 4000;
 const SEEK_COMMIT_DELAY_MS = 320;
-const PROGRAMMATIC_SEEK_TOLERANCE = 1.25;
+const PROGRAMMATIC_SEEK_TOLERANCE = 2.0;
+const PROGRAMMATIC_SEEK_TIMEOUT_MS = 15000;
 
 const ui = {
   loginLayer: $('loginLayer'), loginForm: $('loginForm'), nicknameInput: $('nicknameInput'), passwordInput: $('passwordInput'), loginError: $('loginError'),
@@ -49,7 +50,7 @@ const state = {
   buffering: false, recoveryCheckTimer: null, recoveryReloadTimer: null, stallGraceTimer: null,
   expectedPlay: false, expectedPause: false, expectedSeek: null, expectedRate: null,
   syncTimer: null, syncSeq: 0, lastSyncSeq: 0, lastPeerName: '',
-  seeking: false, seekOrigin: '', seekGraceUntil: 0, userSeekCommitTimer: null,
+  seeking: false, seekOrigin: '', seekGraceUntil: 0, userSeekCommitTimer: null, seekWatchdogTimer: null,
   fallbackUnavailable: false,
 };
 
@@ -78,6 +79,8 @@ function showLogin() {
   clearRecoveryTimers();
   clearTimeout(state.userSeekCommitTimer);
   state.userSeekCommitTimer = null;
+  clearTimeout(state.seekWatchdogTimer);
+  state.seekWatchdogTimer = null;
   ui.loginLayer.classList.remove('hidden');
   ui.app.classList.add('hidden');
   ui.settingsModal.classList.add('hidden');
@@ -333,22 +336,62 @@ function armSeekGrace(durationMs = SEEK_GRACE_MS) {
   }, remaining + 60);
 }
 
-function setProgrammaticSeek(target) {
+function clearSeekWatchdog() {
+  clearTimeout(state.seekWatchdogTimer);
+  state.seekWatchdogTimer = null;
+}
+
+function setProgrammaticSeek(target, context = {}) {
   if (!Number.isFinite(target)) return;
   const duration = Number(player.duration);
   const upper = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.05) : Number.POSITIVE_INFINITY;
   const value = Math.min(upper, Math.max(0, target));
   if (Math.abs(Number(player.currentTime || 0) - value) < 0.08) return;
 
+  const revision = Number(context.revision ?? state.lastSnapshot?.revision ?? state.lastRevision ?? 0);
+  const reason = String(context.reason || '');
+  const active = state.expectedSeek;
+  const inFlight = Boolean(active && (state.seeking || player.seeking));
+
+  // A slow Range seek may take many seconds on the viewer that joined later.
+  // Periodic sync samples must never keep assigning currentTime while that seek
+  // is still in flight, otherwise the browser restarts the Range jump forever.
+  // Only a genuinely newer explicit user seek is allowed to supersede it.
+  if (inFlight) {
+    const newerExplicitSeek = reason === 'seek'
+      && revision > Number(active.revision || 0)
+      && Math.abs(value - Number(active.target || 0)) > 0.08;
+    if (!newerExplicitSeek) return;
+  }
+
   clearTimeout(state.userSeekCommitTimer);
   state.userSeekCommitTimer = null;
-  state.expectedSeek = { target: value, issuedAt: Date.now() };
+  clearSeekWatchdog();
+  state.expectedSeek = {
+    target: value,
+    issuedAt: Date.now(),
+    revision,
+    reason: reason || 'sync',
+  };
   state.seekOrigin = 'programmatic';
   armSeekGrace(SEEK_GRACE_MS);
+
+  const transaction = state.expectedSeek;
+  state.seekWatchdogTimer = setTimeout(() => {
+    if (state.expectedSeek !== transaction) return;
+    clearSeekWatchdog();
+    state.expectedSeek = null;
+    state.seeking = false;
+    state.seekOrigin = '';
+    setNotice('跳转耗时过长，正在重新建立媒体连接…');
+    reloadCurrentMedia('seek-timeout');
+  }, PROGRAMMATIC_SEEK_TIMEOUT_MS);
+
   try {
     player.currentTime = value;
     syncReconciler.noteHardSeek();
   } catch {
+    clearSeekWatchdog();
     state.expectedSeek = null;
     state.seekOrigin = '';
   }
@@ -411,6 +454,7 @@ function loadMedia(snapshot) {
   clearRecoveryTimers();
   clearTimeout(state.userSeekCommitTimer);
   state.userSeekCommitTimer = null;
+  clearSeekWatchdog();
   mediaRecovery.reset({ preparing: true });
   state.mediaPath = snapshot.media.path;
   state.mediaVersion = Number(snapshot.mediaVersion || 0);
@@ -458,6 +502,7 @@ function clearMedia() {
   clearRecoveryTimers();
   clearTimeout(state.userSeekCommitTimer);
   state.userSeekCommitTimer = null;
+  clearSeekWatchdog();
   mediaRecovery.reset();
   state.mediaPath = '';
   state.mediaVersion = Number(state.lastSnapshot?.mediaVersion || state.mediaVersion + 1);
@@ -489,6 +534,19 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   const current = Number(player.currentTime || 0);
   const drift = current - target;
   const absDrift = Math.abs(drift);
+
+  // Once a programmatic Range seek has started, ordinary periodic sync samples
+  // are observations only. Reassigning currentTime every second is especially
+  // harmful on a late-joining Safari client and can leave it permanently black.
+  // A newer explicit room seek may still supersede the in-flight transaction.
+  if (state.expectedSeek && (state.seeking || player.seeking) && snapshot.reason !== 'seek') {
+    setProgrammaticRate(desiredRate);
+    ui.rateSelect.value = String(desiredRate);
+    ui.syncBadge.textContent = '正在跳转 · 等待媒体定位';
+    ui.syncBadge.classList.remove('good');
+    if (!snapshot.playing) setProgrammaticPause();
+    return;
+  }
 
   // During recovery, playback continuity wins over timeline precision.
   if (mediaRecovery.shouldFreezeSync() && snapshot.reason !== 'seek') {
@@ -524,7 +582,12 @@ function applyPlayback(snapshot, force = false, sampled = false) {
 
   if (decision.action === 'seek') {
     setProgrammaticRate(desiredRate);
-    if (absDrift > 0.2) setProgrammaticSeek(target);
+    if (absDrift > 0.2) {
+      setProgrammaticSeek(target, {
+        revision: Number(snapshot.revision || 0),
+        reason: snapshot.reason,
+      });
+    }
   } else if (decision.action === 'rate') {
     setProgrammaticRate(decision.rate);
   } else if (decision.action === 'normal' || decision.action === 'hold') {
@@ -665,14 +728,19 @@ function scheduleMediaReload(reason = 'network') {
 
 function reloadCurrentMedia(reason = 'network') {
   if (!state.mediaPath) return;
+  clearSeekWatchdog();
   const target = state.lastSnapshot ? targetPosition(state.lastSnapshot) : Number(player.currentTime || 0);
   const seq = ++state.loadSeq;
   state.sourceLoading = true;
   state.mediaReady = false;
+  state.expectedSeek = null;
+  state.seeking = false;
+  state.seekOrigin = '';
   clearCorrection(false);
   mediaRecovery.markReloadStarted(Date.now(), target);
   ui.syncBadge.textContent = '正在恢复媒体';
-  setNotice(`正在重新建立 123 媒体读取连接（${reason === 'stall' ? '持续卡顿' : '网络错误'}）…`);
+  const reasonLabel = reason === 'stall' ? '持续卡顿' : (reason === 'seek-timeout' ? '跳转超时' : '网络错误');
+  setNotice(`正在重新建立 123 媒体读取连接（${reasonLabel}）…`);
 
   player.pause();
   player.removeAttribute('src');
@@ -685,7 +753,12 @@ function reloadCurrentMedia(reason = 'network') {
     state.sourceLoading = false;
     state.mediaReady = true;
     mediaRecovery.markReloadMetadata();
-    if (Number.isFinite(target) && target > 0.05) setProgrammaticSeek(target);
+    if (Number.isFinite(target) && target > 0.05) {
+      setProgrammaticSeek(target, {
+        revision: Number(state.lastSnapshot?.revision || 0),
+        reason: 'recovery',
+      });
+    }
     requestSync(false);
     scheduleRecoveryCheck();
   };
@@ -750,16 +823,18 @@ player.addEventListener('seeking', () => {
   state.seeking = true;
   mediaRecovery.invalidateStability();
 
-  const expected = state.expectedSeek;
-  const current = Number(player.currentTime || 0);
-  if (expected && Math.abs(current - expected.target) <= PROGRAMMATIC_SEEK_TOLERANCE) {
+  // A programmatic seek transaction is armed before currentTime is assigned.
+  // Slow Safari/remote Range pipelines may emit `seeking` while currentTime still
+  // reports the old position, so never classify by instantaneous currentTime here.
+  // If a real user scrub supersedes this transaction, the final `seeked` position
+  // will be far from the expected target and is handled there.
+  if (state.expectedSeek) {
     state.seekOrigin = 'programmatic';
   } else {
-    // A real user scrub supersedes any old programmatic seek transaction.
-    state.expectedSeek = null;
     state.seekOrigin = 'user';
     clearTimeout(state.userSeekCommitTimer);
     state.userSeekCommitTimer = null;
+    clearSeekWatchdog();
   }
 
   armSeekGrace(SEEK_GRACE_MS);
@@ -786,15 +861,22 @@ player.addEventListener('seeked', () => {
 
   const expected = state.expectedSeek;
   const current = Number(player.currentTime || 0);
-  if (expected && Math.abs(current - expected.target) <= PROGRAMMATIC_SEEK_TOLERANCE) {
-    // No short timeout: remote 4K Range seeks can legitimately take several
-    // seconds. Treat the completed seek as local implementation detail forever
-    // unless the user explicitly moved to a different target in the meantime.
+  if (expected && state.seekOrigin === 'programmatic' && Math.abs(current - expected.target) <= PROGRAMMATIC_SEEK_TOLERANCE) {
+    clearSeekWatchdog();
     state.expectedSeek = null;
     state.seekOrigin = '';
+    armSeekGrace(SEEK_GRACE_MS);
+
+    // Do not force another seek immediately. The room may have advanced while a
+    // slow Range request completed; a normal measured sync can decide later
+    // whether any correction is actually visible enough to matter.
+    setTimeout(() => requestSync(false), 120);
     return;
   }
 
+  // If the final position is far from the armed programmatic target, the user
+  // intentionally scrubbed somewhere else while the old seek was in flight.
+  clearSeekWatchdog();
   state.expectedSeek = null;
   state.seekOrigin = 'user';
   clearTimeout(state.userSeekCommitTimer);
@@ -823,6 +905,7 @@ player.addEventListener('ended', () => {
   clearRecoveryTimers();
   clearTimeout(state.userSeekCommitTimer);
   state.userSeekCommitTimer = null;
+  clearSeekWatchdog();
   mediaRecovery.cancelStall({ keepAttempts: false });
   setBuffering(false);
   if (state.mediaPath) emitControl('player:pause', mediaPayload({ position: player.duration || player.currentTime }));
@@ -850,6 +933,7 @@ player.addEventListener('error', () => {
   }
 
   clearRecoveryTimers();
+  clearSeekWatchdog();
   setBuffering(false);
   state.sourceLoading = false;
   state.mediaReady = false;
