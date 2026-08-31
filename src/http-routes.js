@@ -118,7 +118,12 @@ function registerHttpRoutes(options = {}) {
     try {
       const checked = checkedMediaPath(req.query.path);
       if (checked.error) return res.status(400).json({ ok: false, error: checked.error });
-      const playable = await mediaService.resolvePlayable(checked.mediaPath);
+
+      // Resolve a fresh signed provider URL for every browser bootstrap. The
+      // browser-local Service Worker owns its own short cache, so sharing one
+      // server-side signed URL across two viewers only creates cross-client
+      // coupling and can break the viewer who joins later.
+      const playable = await mediaService.resolvePlayable(checked.mediaPath, { fresh: true });
       const destination = new URL(playable.url);
       if (!['http:', 'https:'].includes(destination.protocol)) {
         throw new WebDavError('WebDAV 返回了浏览器无法使用的播放协议', 502, 'WEBDAV_BAD_DIRECT_URL');
