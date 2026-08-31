@@ -8,13 +8,12 @@
     "start": "node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check server.js && node --check src/config.js && node --check src/settings.js && node --check src/webdav.js && node --check src/watch-room.js && node --check public/app.js && npm test"
+    "check": "node --check server.js && node --check src/config.js && node --check src/settings.js && node --check src/webdav.js && node --check src/watch-room.js && node --check public/app.js && node --check public/media-transport.js && node --check public/media-diagnostics.js && node --check public/sw.js && npm test"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
     "compression": "^1.7.5",
     "cookie-session": "^2.1.0",
-    "express": "^4.21.2",
     "fast-xml-parser": "^5.2.5",
     "helmet": "^8.1.0",
     "socket.io": "^4.8.1"
