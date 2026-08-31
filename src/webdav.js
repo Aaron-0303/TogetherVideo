@@ -134,15 +134,17 @@ class WebDavClient {
   }
 
   async propfind(relativePath = '', depth = 1) {
+    // 123pan's WebDAV collection endpoint is known to work with the request
+    // shape used by curl/WebDAV clients: collection URL ending in '/', Basic
+    // Auth + Depth, and no request body (RFC 4918 allprop semantics).
     let url = this.buildUrl(relativePath);
-    const body = `<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:"><d:prop><d:displayname/><d:resourcetype/><d:getcontentlength/><d:getcontenttype/><d:getlastmodified/></d:prop></d:propfind>`;
+    if (!url.endsWith('/')) url += '/';
     let response = null;
 
     for (let redirects = 0; redirects <= 4; redirects++) {
       response = await this.fetchWithTimeout(url, {
         method: 'PROPFIND',
-        headers: this.headers({ Depth: String(depth), 'Content-Type': 'application/xml; charset=utf-8' }),
-        body,
+        headers: this.headers({ Depth: String(depth) }),
         redirect: 'manual',
       });
 
