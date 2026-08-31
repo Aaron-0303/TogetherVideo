@@ -49,7 +49,7 @@
   function describe(result, mediaErrorCode) {
     const media = result?.media || {};
     const probe = result?.probe || {};
-    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2.1 使用 Artplayer 控件 + 原生 HTMLVideoElement；浏览器本地 MIME bridge 会保留原始 Range，并把 123 的下载型响应修正为可播放媒体响应。`];
+    const lines = [`${mediaErrorName(mediaErrorCode)}。当前使用 Artplayer 控件 + 原生 HTMLVideoElement；浏览器本地 MIME bridge 会修正 123 的下载型响应，并恢复 3.1.2 的 16 MiB 有界 Range 读取，避免首包退化成整个大文件的 HTTP 200。`];
 
     if (!probe.ok) {
       lines.push(`123 媒体节点探测失败${probe.status ? `（HTTP ${probe.status}）` : ''}。`);
@@ -65,9 +65,9 @@
     lines.push(`123 原始响应：${details.join(' · ') || '可访问'}。`);
 
     if (!probe.rangeSupported) {
-      lines.push('没有检测到 Byte Range/206 支持，这会直接影响拖动和连续播放。');
+      lines.push('没有检测到 Byte Range 支持，这会直接影响拖动和连续播放。');
     } else {
-      lines.push('Range/206 可用；3.2.1 不再做 16 MiB 人工分片，Safari/Chrome 的 Range 内容会原样发送到 123。');
+      lines.push('服务端支持 Byte Range；浏览器媒体请求会按 16 MiB 窗口读取，保留请求起点并避免一次请求整个剩余文件。');
     }
 
     if (/application\/octet-stream/i.test(probe.contentType || '')) {
@@ -77,7 +77,7 @@
     if (media.expectedMime) {
       const support = video.canPlayType(media.expectedMime);
       if (!support) lines.push(`浏览器报告不支持 ${media.expectedMime} 容器。`);
-      else lines.push(`浏览器接受 ${media.expectedMime} 容器；如果兼容层已经工作但仍失败，再检查内部 H.264/HEVC/AAC 轨道。`);
+      else lines.push(`浏览器接受 ${media.expectedMime} 容器；如果有界 Range 和 MIME bridge 均已工作但仍失败，再检查内部 H.264/HEVC/AAC 轨道。`);
     }
 
     if (!media.mobilePreferred) lines.push('该封装不是移动端优先格式。');
