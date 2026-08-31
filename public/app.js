@@ -4,10 +4,26 @@ const ui = {
   loginLayer: $('loginLayer'), loginForm: $('loginForm'), nicknameInput: $('nicknameInput'), passwordInput: $('passwordInput'), loginError: $('loginError'),
   app: $('app'), socketBadge: $('socketBadge'), onlineBadge: $('onlineBadge'), logoutBtn: $('logoutBtn'), settingsBtn: $('settingsBtn'),
   libraryToggle: $('libraryToggle'), closeLibraryBtn: $('closeLibraryBtn'), libraryPanel: $('libraryPanel'), breadcrumbs: $('breadcrumbs'), libraryStatus: $('libraryStatus'), libraryList: $('libraryList'), refreshLibraryBtn: $('refreshLibraryBtn'),
-  video: $('video'), emptyPlayer: $('emptyPlayer'), resumeOverlay: $('resumeOverlay'), mediaTitle: $('mediaTitle'), syncBadge: $('syncBadge'), playerNotice: $('playerNotice'),
+  videoShell: $('videoShell'), video: $('video'), libmediaPlayer: $('libmediaPlayer'), emptyPlayer: $('emptyPlayer'), resumeOverlay: $('resumeOverlay'), mediaTitle: $('mediaTitle'), syncBadge: $('syncBadge'), playerNotice: $('playerNotice'),
+  compatControls: $('compatControls'), compatPlayBtn: $('compatPlayBtn'), compatSeek: $('compatSeek'), compatTime: $('compatTime'), compatVolume: $('compatVolume'), compatFullscreenBtn: $('compatFullscreenBtn'),
   waitBtn: $('waitBtn'), syncNowBtn: $('syncNowBtn'), rateSelect: $('rateSelect'), selfStatus: $('selfStatus'), selfBuffering: $('selfBuffering'), peerStatus: $('peerStatus'), peerBuffering: $('peerBuffering'), peerDot: $('peerDot'),
   settingsModal: $('settingsModal'), closeSettingsBtn: $('closeSettingsBtn'), webdavUrl: $('webdavUrl'), webdavUsername: $('webdavUsername'), webdavPassword: $('webdavPassword'), webdavRoot: $('webdavRoot'), testWebdavBtn: $('testWebdavBtn'), saveWebdavBtn: $('saveWebdavBtn'), newSitePassword: $('newSitePassword'), saveSitePasswordBtn: $('saveSitePasswordBtn'), settingsNotice: $('settingsNotice'), toast: $('toast'),
 };
+
+const player = new HybridMedia({
+  video: ui.video,
+  container: ui.libmediaPlayer,
+  shell: ui.videoShell,
+  controls: {
+    root: ui.compatControls,
+    play: ui.compatPlayBtn,
+    seek: ui.compatSeek,
+    time: ui.compatTime,
+    volume: ui.compatVolume,
+    fullscreen: ui.compatFullscreenBtn,
+  },
+});
+window.TogetherMediaPlayer = player;
 
 const syncReconciler = new SyncPolicy.Reconciler();
 
@@ -256,35 +272,35 @@ function clearCorrection(restore = true) {
 }
 
 function setProgrammaticRate(rate) {
-  const value = Math.min(4, Math.max(0.25, Number(rate || 1)));
-  if (Math.abs(ui.video.playbackRate - value) < 0.001) return;
+  const value = Math.min(2, Math.max(0.5, Number(rate || 1)));
+  if (Math.abs(player.playbackRate - value) < 0.001) return;
   state.expectedRate = { value, until: Date.now() + 1500 };
-  ui.video.playbackRate = value;
+  player.playbackRate = value;
   ui.rateSelect.value = String(Number(state.lastSnapshot?.rate || value));
 }
 
 function setProgrammaticSeek(target) {
   if (!Number.isFinite(target)) return;
-  const duration = Number(ui.video.duration);
+  const duration = Number(player.duration);
   const upper = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.05) : Number.POSITIVE_INFINITY;
   const value = Math.min(upper, Math.max(0, target));
-  state.expectedSeek = { target: value, until: Date.now() + 2200 };
+  state.expectedSeek = { target: value, until: Date.now() + 3000 };
   try {
-    ui.video.currentTime = value;
+    player.currentTime = value;
     syncReconciler.noteHardSeek();
   } catch {}
 }
 
 function setProgrammaticPause() {
-  if (ui.video.paused) return;
-  state.expectedPauseUntil = Date.now() + 1500;
-  ui.video.pause();
+  if (player.paused) return;
+  state.expectedPauseUntil = Date.now() + 1800;
+  player.pause();
 }
 
 function setProgrammaticPlay() {
-  if (!ui.video.paused) return;
-  state.expectedPlayUntil = Date.now() + 1800;
-  ui.video.play()
+  if (!player.paused) return;
+  state.expectedPlayUntil = Date.now() + 2500;
+  player.play()
     .then(() => ui.resumeOverlay.classList.add('hidden'))
     .catch(() => {
       state.expectedPlayUntil = 0;
@@ -336,23 +352,26 @@ function loadMedia(snapshot) {
   ui.syncBadge.classList.remove('good');
   setNotice('正在从 WebDAV 获取浏览器直连地址…');
 
-  ui.video.pause();
-  ui.video.removeAttribute('src');
-  ui.video.load();
-  ui.video.src = `/api/media?path=${encodeURIComponent(state.mediaPath)}&v=${state.mediaVersion}`;
-  ui.video.load();
+  player.pause();
+  player.removeAttribute('src');
+  player.src = `/api/media?path=${encodeURIComponent(state.mediaPath)}&v=${state.mediaVersion}`;
+  player.load();
 
   const onReady = () => {
-    ui.video.removeEventListener('loadedmetadata', onReady);
+    player.removeEventListener('loadedmetadata', onReady);
     if (seq !== state.loadSeq) return;
     state.sourceLoading = false;
     state.mediaReady = true;
-    setNotice('');
-    if (ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
+    if (player.mode === 'libmedia') {
+      setNotice('已自动启用 HEVC 兼容播放器；视频仍直接从 123 获取，不经过本服务器。');
+    } else {
+      setNotice('');
+    }
+    if (player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
     requestSync(true);
     refreshActiveLibraryItem();
   };
-  ui.video.addEventListener('loadedmetadata', onReady);
+  player.addEventListener('loadedmetadata', onReady);
 }
 
 function clearMedia() {
@@ -364,9 +383,9 @@ function clearMedia() {
   state.seeking = false;
   clearCorrection(false);
   setBuffering(false);
-  ui.video.pause();
-  ui.video.removeAttribute('src');
-  ui.video.load();
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
   ui.mediaTitle.textContent = '选择一个视频开始';
   ui.emptyPlayer.classList.remove('hidden');
   ui.syncBadge.textContent = '等待视频';
@@ -378,7 +397,7 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   if (!state.mediaReady || snapshot.media?.path !== state.mediaPath || Number(snapshot.mediaVersion) !== state.mediaVersion) return;
   const desiredRate = Number(snapshot.rate || 1);
   const target = targetPosition(snapshot);
-  const current = Number(ui.video.currentTime || 0);
+  const current = Number(player.currentTime || 0);
   const drift = current - target;
   const absDrift = Math.abs(drift);
   const decision = syncReconciler.decide({
@@ -401,12 +420,13 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   }
 
   ui.rateSelect.value = String(desiredRate);
-  if (state.buffering) ui.syncBadge.textContent = `缓冲中 · 差 ${absDrift.toFixed(1)}s`;
-  else if (absDrift <= 0.4) ui.syncBadge.textContent = '已对轴';
-  else if (absDrift < 1.2) ui.syncBadge.textContent = `同步稳定 · 差 ${absDrift.toFixed(1)}s`;
-  else if (decision.action === 'rate' || decision.action === 'preserve') ui.syncBadge.textContent = `平滑校准 · 差 ${absDrift.toFixed(1)}s`;
-  else if (decision.action === 'seek') ui.syncBadge.textContent = '已重新对轴';
-  else ui.syncBadge.textContent = `观察偏差 · ${absDrift.toFixed(1)}s`;
+  const engine = player.mode === 'libmedia' ? ' · HEVC' : '';
+  if (state.buffering) ui.syncBadge.textContent = `缓冲中${engine} · 差 ${absDrift.toFixed(1)}s`;
+  else if (absDrift <= 0.4) ui.syncBadge.textContent = `已对轴${engine}`;
+  else if (absDrift < 1.2) ui.syncBadge.textContent = `同步稳定${engine} · 差 ${absDrift.toFixed(1)}s`;
+  else if (decision.action === 'rate' || decision.action === 'preserve') ui.syncBadge.textContent = `平滑校准${engine} · 差 ${absDrift.toFixed(1)}s`;
+  else if (decision.action === 'seek') ui.syncBadge.textContent = `已重新对轴${engine}`;
+  else ui.syncBadge.textContent = `观察偏差${engine} · ${absDrift.toFixed(1)}s`;
   ui.syncBadge.classList.toggle('good', absDrift <= 0.6 && !state.buffering);
 
   if (snapshot.playing) setProgrammaticPlay();
@@ -420,51 +440,67 @@ function refreshActiveLibraryItem() {
   }
 }
 
-ui.video.addEventListener('play', () => {
+player.addEventListener('fallbackstart', () => {
+  if (!state.mediaPath) return;
+  ui.syncBadge.textContent = '切换 HEVC 兼容模式';
+  ui.syncBadge.classList.remove('good');
+  setNotice('原生播放器无法解码，正在启动 HEVC 兼容播放器…');
+  setBuffering(true);
+});
+
+player.addEventListener('fallbackready', () => {
+  if (!state.mediaPath) return;
+  ui.syncBadge.textContent = 'HEVC 兼容模式';
+  ui.syncBadge.classList.remove('good');
+  setNotice('HEVC 兼容播放器已就绪；视频仍直接从 123 获取。');
+  requestSync(true);
+});
+
+player.addEventListener('play', () => {
   if (state.sourceLoading) return;
   if (Date.now() <= state.expectedPlayUntil) { state.expectedPlayUntil = 0; return; }
-  emitControl('player:play', mediaPayload({ position: ui.video.currentTime }));
+  emitControl('player:play', mediaPayload({ position: player.currentTime }));
 });
 
-ui.video.addEventListener('pause', () => {
+player.addEventListener('pause', () => {
   if (state.sourceLoading) return;
   if (Date.now() <= state.expectedPauseUntil) { state.expectedPauseUntil = 0; return; }
-  if (state.seeking || ui.video.seeking) return;
-  if (ui.video.ended || !state.mediaPath) return;
-  emitControl('player:pause', mediaPayload({ position: ui.video.currentTime }));
+  if (state.seeking || player.seeking) return;
+  if (player.ended || !state.mediaPath) return;
+  emitControl('player:pause', mediaPayload({ position: player.currentTime }));
 });
 
-ui.video.addEventListener('seeking', () => {
+player.addEventListener('seeking', () => {
   state.seeking = true;
 });
 
-ui.video.addEventListener('seeked', () => {
+player.addEventListener('seeked', () => {
   state.seeking = false;
   if (state.sourceLoading || !state.mediaPath) return;
   const expected = state.expectedSeek;
-  if (expected && Date.now() <= expected.until && Math.abs(ui.video.currentTime - expected.target) < 0.8) {
+  if (expected && Date.now() <= expected.until && Math.abs(player.currentTime - expected.target) < 0.8) {
     state.expectedSeek = null;
     return;
   }
   state.expectedSeek = null;
   clearCorrection(false);
-  emitControl('player:seek', mediaPayload({ position: ui.video.currentTime }));
+  emitControl('player:seek', mediaPayload({ position: player.currentTime }));
 });
 
-ui.video.addEventListener('ratechange', () => {
+player.addEventListener('ratechange', () => {
   if (state.sourceLoading || !state.mediaPath) return;
   const expected = state.expectedRate;
-  if (expected && Date.now() <= expected.until && Math.abs(ui.video.playbackRate - expected.value) < 0.01) {
+  if (expected && Date.now() <= expected.until && Math.abs(player.playbackRate - expected.value) < 0.01) {
     state.expectedRate = null;
     return;
   }
   state.expectedRate = null;
   clearCorrection(false);
-  emitControl('player:rate', mediaPayload({ rate: ui.video.playbackRate }));
+  emitControl('player:rate', mediaPayload({ rate: player.playbackRate }));
 });
 
-ui.video.addEventListener('ended', () => {
-  if (state.mediaPath) emitControl('player:pause', mediaPayload({ position: ui.video.duration || ui.video.currentTime }));
+player.addEventListener('ended', () => {
+  if (state.mediaPath) emitControl('player:pause', mediaPayload({ position: player.duration || player.currentTime }));
 });
 
 function setBuffering(value) {
@@ -479,7 +515,7 @@ function setBuffering(value) {
 }
 
 function beginBuffering() {
-  if (ui.video.paused || !state.mediaPath) return;
+  if (player.paused || !state.mediaPath) return;
   clearTimeout(state.bufferTimer);
   state.bufferTimer = setTimeout(() => setBuffering(true), 500);
 }
@@ -489,31 +525,33 @@ function endBuffering() {
   setBuffering(false);
 }
 
-ui.video.addEventListener('waiting', beginBuffering);
-ui.video.addEventListener('stalled', beginBuffering);
-ui.video.addEventListener('playing', endBuffering);
-ui.video.addEventListener('canplay', endBuffering);
-ui.video.addEventListener('loadeddata', endBuffering);
-ui.video.addEventListener('progress', () => {
-  if (state.buffering && ui.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
+player.addEventListener('waiting', beginBuffering);
+player.addEventListener('stalled', beginBuffering);
+player.addEventListener('playing', endBuffering);
+player.addEventListener('canplay', endBuffering);
+player.addEventListener('loadeddata', endBuffering);
+player.addEventListener('progress', () => {
+  if (state.buffering && player.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) endBuffering();
 });
-ui.video.addEventListener('error', () => {
+player.addEventListener('error', () => {
   if (!state.mediaPath) return;
   state.sourceLoading = false;
   state.mediaReady = false;
   endBuffering();
-  const code = ui.video.error?.code;
-  const message = code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-    ? '浏览器无法播放该视频。可能是编码/封装不受支持，或 WebDAV 没有提供浏览器可直接访问的文件地址。建议优先使用 MP4（H.264 + AAC）。'
-    : '视频直连失败。请先在设置中测试 WebDAV；如果该 WebDAV 只允许 Basic Auth 读取文件、不给 302/签名直链，在“服务器不代理视频”的前提下浏览器无法播放。';
+  const code = player.error?.code;
+  const message = player.mode === 'libmedia'
+    ? `原生播放器和 HEVC 兼容播放器都无法播放该视频${player.error?.message ? `：${player.error.message}` : '。'} 请查看下方媒体诊断。`
+    : (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+      ? '浏览器无法播放该视频，正在尝试 HEVC 兼容播放器；若兼容播放器也失败，请查看媒体诊断。'
+      : '视频读取失败。请先检查 WebDAV 和 123 下载节点是否可访问。');
   setNotice(message, true);
-  ui.syncBadge.textContent = '播放失败';
+  ui.syncBadge.textContent = player.mode === 'libmedia' ? 'HEVC 兼容播放失败' : '播放失败';
   ui.syncBadge.classList.remove('good');
 });
 
 ui.resumeOverlay.addEventListener('click', () => {
-  state.expectedPlayUntil = Date.now() + 1800;
-  ui.video.play().then(() => ui.resumeOverlay.classList.add('hidden')).catch(() => {});
+  state.expectedPlayUntil = Date.now() + 2500;
+  player.play().then(() => ui.resumeOverlay.classList.add('hidden')).catch(() => {});
 });
 
 ui.waitBtn.addEventListener('click', () => emitControl('player:wait'));
@@ -522,7 +560,7 @@ ui.rateSelect.addEventListener('change', () => {
   if (!state.mediaPath) return;
   clearCorrection(false);
   state.expectedRate = null;
-  ui.video.playbackRate = Number(ui.rateSelect.value || 1);
+  player.playbackRate = Number(ui.rateSelect.value || 1);
 });
 
 function openSettings() {
@@ -581,7 +619,7 @@ ui.saveWebdavBtn.addEventListener('click', async () => {
     applySettings(result.settings);
     state.libraryPath = '';
     await loadLibrary('');
-    setSettingsNotice('WebDAV 已保存。视频只会通过浏览器直连，不经过本服务器。');
+    setSettingsNotice('WebDAV 已保存。视频由浏览器直接读取 123；服务器不代理视频数据。');
   } catch (error) { setSettingsNotice(error.message, true); }
   finally { ui.saveWebdavBtn.disabled = false; }
 });
