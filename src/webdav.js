@@ -109,7 +109,10 @@ class WebDavClient {
 
   checkStatus(response) {
     if (response.status === 401 || response.status === 403) {
-      throw new WebDavError('WebDAV 用户名或密码错误，或没有访问权限', 401, 'WEBDAV_AUTH_FAILED');
+      // Upstream WebDAV authentication failure is a settings-validation error,
+      // not a TogetherVideo session failure. Use 422 so the frontend stays in
+      // the settings dialog instead of treating it as a site-login expiration.
+      throw new WebDavError('WebDAV 用户名或密码错误，或没有访问权限', 422, 'WEBDAV_AUTH_FAILED');
     }
     if (response.status === 404) throw new WebDavError('WebDAV 路径不存在', 404, 'WEBDAV_NOT_FOUND');
     if (!response.ok && response.status !== 207) {
