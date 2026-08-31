@@ -21,9 +21,40 @@ test('late join uses one forced metadata catch-up and no second forced first-fra
 });
 
 test('programmatic seek suppression is transaction-based instead of a short timeout', () => {
-  assert.match(appSource, /state\.expectedSeek = \{ target: value, issuedAt: Date\.now\(\) \}/);
+  assert.match(appSource, /state\.expectedSeek = \{[\s\S]{0,220}target: value,[\s\S]{0,220}revision,[\s\S]{0,220}reason:/);
   assert.doesNotMatch(appSource, /expectedSeek\s*=\s*\{[^}]*until:/);
-  assert.match(appSource, /PROGRAMMATIC_SEEK_TOLERANCE/);
+  assert.match(appSource, /PROGRAMMATIC_SEEK_TOLERANCE\s*=\s*2\.0/);
+});
+
+test('an in-flight programmatic seek is not restarted by periodic sync samples', () => {
+  const setterBlock = appSource.match(/function setProgrammaticSeek\(target, context = \{\}\)[\s\S]*?function setProgrammaticPause/)?.[0] || '';
+  assert.ok(setterBlock);
+  assert.match(setterBlock, /const inFlight = Boolean\(active && \(state\.seeking \|\| player\.seeking\)\)/);
+  assert.match(setterBlock, /reason === 'seek'[\s\S]{0,180}revision > Number\(active\.revision \|\| 0\)/);
+  assert.match(setterBlock, /if \(!newerExplicitSeek\) return/);
+
+  const playbackBlock = appSource.match(/function applyPlayback\(snapshot[\s\S]*?function refreshActiveLibraryItem/)?.[0] || '';
+  assert.ok(playbackBlock);
+  assert.match(playbackBlock, /state\.expectedSeek && \(state\.seeking \|\| player\.seeking\) && snapshot\.reason !== 'seek'/);
+  assert.match(playbackBlock, /正在跳转 · 等待媒体定位/);
+});
+
+test('slow seeking events keep the armed programmatic transaction until seeked', () => {
+  const seekingBlock = appSource.match(/player\.addEventListener\('seeking'[\s\S]*?\n\}\);/)?.[0] || '';
+  assert.ok(seekingBlock);
+  assert.match(seekingBlock, /if \(state\.expectedSeek\) \{[\s\S]{0,100}state\.seekOrigin = 'programmatic'/);
+  assert.doesNotMatch(seekingBlock, /Math\.abs\(current - expected\.target\)/);
+
+  const seekedBlock = appSource.match(/player\.addEventListener\('seeked'[\s\S]*?\n\}\);/)?.[0] || '';
+  assert.ok(seekedBlock);
+  assert.match(seekedBlock, /state\.seekOrigin === 'programmatic'/);
+  assert.match(seekedBlock, /Math\.abs\(current - expected\.target\) <= PROGRAMMATIC_SEEK_TOLERANCE/);
+});
+
+test('stuck programmatic seeks recover instead of showing jumping forever', () => {
+  assert.match(appSource, /PROGRAMMATIC_SEEK_TIMEOUT_MS\s*=\s*15000/);
+  assert.match(appSource, /reloadCurrentMedia\('seek-timeout'\)/);
+  assert.match(appSource, /reason === 'seek-timeout' \? '跳转超时'/);
 });
 
 test('user scrubbing publishes only after seek settles', () => {
