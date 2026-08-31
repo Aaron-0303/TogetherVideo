@@ -6,6 +6,7 @@
 const SOURCE_TTL_MS = 120000;
 const RESOLVER_TIMEOUT_MS = 12000;
 const PROVIDER_HEADER_TIMEOUT_MS = 15000;
+const RANGE_CHUNK_BYTES = 16 * 1024 * 1024;
 const sourceCache = new Map();
 
 self.addEventListener('install', () => self.skipWaiting());
@@ -22,14 +23,45 @@ function mimeForPath(mediaPath) {
   return 'application/octet-stream';
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+function boundedMediaRange(rawRange) {
+  const raw = String(rawRange || '').trim();
+  if (!raw) return `bytes=0-${RANGE_CHUNK_BYTES - 1}`;
+
+  // Media elements normally ask for one byte range. Keep unusual/multipart
+  // requests unchanged rather than trying to reinterpret them here.
+  const match = /^bytes=(\d+)-(\d*)$/i.exec(raw);
+  if (!match) return raw;
+
+  const start = Number(match[1]);
+  const requestedEnd = match[2] ? Number(match[2]) : NaN;
+  if (!Number.isSafeInteger(start) || start < 0) return raw;
+
+  const maxEnd = start + RANGE_CHUNK_BYTES - 1;
+  if (Number.isSafeInteger(requestedEnd) && requestedEnd >= start) {
+    return `bytes=${start}-${Math.min(requestedEnd, maxEnd)}`;
+  }
+  return `bytes=${start}-${maxEnd}`;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000, parentSignal = null) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('media request timeout')), timeoutMs);
+  const abortFromParent = () => {
+    try { controller.abort(parentSignal?.reason || new Error('media request cancelled')); } catch {}
+  };
+
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener?.('abort', abortFromParent, { once: true });
+
+  const timer = setTimeout(() => {
+    try { controller.abort(new Error('media request timeout')); } catch {}
+  }, timeoutMs);
+
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     // fetch() resolves when response headers arrive. Do not abort the streaming
-    // response body after that point; only bound the time spent waiting for headers.
+    // body after that point; the browser/request signal remains linked so an old
+    // seek/download can still be cancelled when the media element abandons it.
     clearTimeout(timer);
   }
 }
@@ -83,9 +115,10 @@ async function resolveProviderUrl(mediaPath, fresh = false) {
 
 async function providerFetch(request, source) {
   const headers = new Headers();
-  // Preserve Safari/Chrome's exact Range. If the first media request contains no
-  // Range, bytes=0- still forces the provider into its known-good 206 path.
-  headers.set('Range', request.headers.get('range') || 'bytes=0-');
+  // Do not turn an unbounded media request (bytes=N-) into a download of the
+  // entire remainder of a multi-gigabyte movie. Give the browser a bounded 16MiB
+  // chunk; it can request the next chunk when playback actually needs it.
+  headers.set('Range', boundedMediaRange(request.headers.get('range')));
 
   return fetchWithTimeout(source.url, {
     method: 'GET',
@@ -94,7 +127,7 @@ async function providerFetch(request, source) {
     credentials: 'omit',
     redirect: 'follow',
     cache: 'no-store',
-  }, PROVIDER_HEADER_TIMEOUT_MS);
+  }, PROVIDER_HEADER_TIMEOUT_MS, request.signal);
 }
 
 function browserMediaResponse(upstream, mime) {
@@ -131,7 +164,7 @@ async function handleMedia(request, requestUrl) {
     let upstream = await providerFetch(request, source);
 
     // Long movies may outlive a signed CDN URL. Resolve once more and repeat the
-    // exact Range instead of pushing an expired URL back to the <video> element.
+    // exact logical Range instead of pushing an expired URL back to the <video> element.
     if (upstream.status === 401 || upstream.status === 403) {
       await upstream.body?.cancel().catch(() => {});
       sourceCache.delete(mediaPath);
