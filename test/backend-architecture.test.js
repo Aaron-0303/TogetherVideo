@@ -25,7 +25,7 @@ test('server entrypoint stays composition-only instead of regrowing room/media l
   assert.match(source, /registerSocketGateway\(/);
   assert.doesNotMatch(source, /io\.on\('connection'/);
   assert.doesNotMatch(source, /app\.get\('\/api\/library'/);
-  assert.doesNotMatch(source, /bufferingPauseTimer|playableCache/);
+  assert.doesNotMatch(source, /playableCache/);
 });
 
 test('room coordinator enforces the configured participant limit', () => {
@@ -38,7 +38,7 @@ test('room coordinator enforces the configured participant limit', () => {
   coordinator.stop();
 });
 
-test('sustained buffering pauses and then resumes the authoritative room', async () => {
+test('sustained buffering enters a barrier and resumes only after both viewers are ready', async () => {
   const io = fakeIo();
   const room = new WatchRoom();
   const selected = room.apply('select', { mediaPath: 'movie.mp4' }, 'A');
@@ -52,22 +52,30 @@ test('sustained buffering pauses and then resumes the authoritative room', async
     io,
     room,
     maxParticipants: 2,
-    pauseDelayMs: 20,
-    resumeDelayMs: 20,
+    bufferingDelayMs: 20,
+    startDelayMs: 30,
   });
   coordinator.registerParticipant('a', 'A', 'socket-a');
   coordinator.registerParticipant('b', 'B', 'socket-b');
 
   coordinator.setBuffering('b', 'socket-b', true);
   await delay(45);
-  assert.equal(room.snapshot().playing, false);
-  assert.equal(room.snapshot().reason, 'wait');
-  assert.ok(io.events.some((item) => item.event === 'room:buffering-hold'));
+  const prepared = room.snapshot();
+  assert.equal(prepared.playing, false);
+  assert.equal(prepared.reason, 'barrier-buffering');
+  assert.ok(coordinator.barrier);
+  assert.ok(io.events.some((item) => item.event === 'room:barrier' && item.payload?.phase === 'preparing'));
 
+  const barrierId = coordinator.barrier.id;
   coordinator.setBuffering('b', 'socket-b', false);
-  await delay(45);
-  assert.equal(room.snapshot().playing, true);
-  assert.equal(room.snapshot().reason, 'play');
-  assert.ok(io.events.some((item) => item.event === 'room:buffering-resume'));
+  assert.equal(coordinator.markReady('a', 'socket-a', { barrierId, mediaVersion: selected.mediaVersion }), true);
+  assert.equal(room.snapshot().playing, false);
+  assert.equal(coordinator.markReady('b', 'socket-b', { barrierId, mediaVersion: selected.mediaVersion }), true);
+
+  const released = room.snapshot();
+  assert.equal(released.playing, true);
+  assert.equal(released.reason, 'barrier-release');
+  assert.ok(released.startAt > released.serverNow);
+  assert.ok(io.events.some((item) => item.event === 'room:barrier' && item.payload?.phase === 'starting'));
   coordinator.stop();
 });
