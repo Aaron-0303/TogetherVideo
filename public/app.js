@@ -1,5 +1,10 @@
 const $ = (id) => document.getElementById(id);
 const USER_PLAYBACK_RATES = Object.freeze([0.5, 0.75, 1, 1.25, 1.5, 2]);
+const SEEK_GRACE_MS = 6000;
+const STARTUP_GRACE_MS = 7000;
+const FIRST_FRAME_GRACE_MS = 4000;
+const SEEK_COMMIT_DELAY_MS = 320;
+const PROGRAMMATIC_SEEK_TOLERANCE = 1.25;
 
 const ui = {
   loginLayer: $('loginLayer'), loginForm: $('loginForm'), nicknameInput: $('nicknameInput'), passwordInput: $('passwordInput'), loginError: $('loginError'),
@@ -41,10 +46,11 @@ const state = {
   libraryPath: '', librarySeq: 0,
   mediaPath: '', mediaVersion: 0, sourceLoading: false, mediaReady: false, loadSeq: 0,
   lastSnapshot: null, lastRevision: -1, halfRttMs: 0,
-  buffering: false, recoveryCheckTimer: null, recoveryReloadTimer: null,
-  expectedPlayUntil: 0, expectedPauseUntil: 0, expectedSeek: null, expectedRate: null,
+  buffering: false, recoveryCheckTimer: null, recoveryReloadTimer: null, stallGraceTimer: null,
+  expectedPlay: false, expectedPause: false, expectedSeek: null, expectedRate: null,
   syncTimer: null, syncSeq: 0, lastSyncSeq: 0, lastPeerName: '',
-  seeking: false, fallbackUnavailable: false,
+  seeking: false, seekOrigin: '', seekGraceUntil: 0, userSeekCommitTimer: null,
+  fallbackUnavailable: false,
 };
 
 function isUserPlaybackRate(value) {
@@ -70,6 +76,8 @@ function showLogin() {
   state.socket?.disconnect();
   clearInterval(state.syncTimer);
   clearRecoveryTimers();
+  clearTimeout(state.userSeekCommitTimer);
+  state.userSeekCommitTimer = null;
   ui.loginLayer.classList.remove('hidden');
   ui.app.classList.add('hidden');
   ui.settingsModal.classList.add('hidden');
@@ -164,7 +172,9 @@ function connectSocket() {
   socket.on('connect', () => {
     ui.socketBadge.textContent = '已连接';
     ui.socketBadge.classList.add('online');
-    requestSync(true);
+    // The server always sends room:snapshot on connection. Do not immediately
+    // issue a second forced sync here: on a late join this used to race the
+    // initial media load and could produce two back-to-back seeks.
   });
   socket.on('disconnect', () => {
     ui.socketBadge.textContent = '重连中';
@@ -202,6 +212,7 @@ function requestSync(force = false) {
 
 function localMediaStatus() {
   if (state.sourceLoading) return '正在准备媒体';
+  if (state.seeking || player.seeking) return '正在跳转';
   if (state.buffering) return '正在缓冲';
   const phase = mediaRecovery.snapshot().phase;
   if (phase === 'recovering') return '恢复中';
@@ -302,31 +313,60 @@ function setProgrammaticRate(rate) {
   ui.rateSelect.value = String(Number(state.lastSnapshot?.rate || value));
 }
 
+function armSeekGrace(durationMs = SEEK_GRACE_MS) {
+  const duration = Math.max(0, Number(durationMs || 0));
+  state.seekGraceUntil = Math.max(state.seekGraceUntil, Date.now() + duration);
+
+  // An intentional seek or initial catch-up is not network buffering. Clear any
+  // stale shared-buffer state so one viewer scrubbing never pauses the other.
+  clearTimeout(state.recoveryCheckTimer);
+  state.recoveryCheckTimer = null;
+  mediaRecovery.cancelStall({ keepAttempts: true });
+  if (state.buffering) setBuffering(false, { resync: false });
+
+  clearTimeout(state.stallGraceTimer);
+  const remaining = Math.max(0, state.seekGraceUntil - Date.now());
+  state.stallGraceTimer = setTimeout(() => {
+    state.stallGraceTimer = null;
+    if (!state.mediaPath || state.sourceLoading || player.paused || player.seeking || state.seeking) return;
+    if (player.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) beginMediaStall();
+  }, remaining + 60);
+}
+
 function setProgrammaticSeek(target) {
   if (!Number.isFinite(target)) return;
   const duration = Number(player.duration);
   const upper = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.05) : Number.POSITIVE_INFINITY;
   const value = Math.min(upper, Math.max(0, target));
-  state.expectedSeek = { target: value, until: Date.now() + 3500 };
+  if (Math.abs(Number(player.currentTime || 0) - value) < 0.08) return;
+
+  clearTimeout(state.userSeekCommitTimer);
+  state.userSeekCommitTimer = null;
+  state.expectedSeek = { target: value, issuedAt: Date.now() };
+  state.seekOrigin = 'programmatic';
+  armSeekGrace(SEEK_GRACE_MS);
   try {
     player.currentTime = value;
     syncReconciler.noteHardSeek();
-  } catch {}
+  } catch {
+    state.expectedSeek = null;
+    state.seekOrigin = '';
+  }
 }
 
 function setProgrammaticPause() {
   if (player.paused) return;
-  state.expectedPauseUntil = Date.now() + 1800;
+  state.expectedPause = true;
   player.pause();
 }
 
 function setProgrammaticPlay() {
   if (!player.paused) return;
-  state.expectedPlayUntil = Date.now() + 2500;
+  state.expectedPlay = true;
   player.play()
     .then(() => ui.resumeOverlay.classList.add('hidden'))
     .catch(() => {
-      state.expectedPlayUntil = 0;
+      state.expectedPlay = false;
       ui.resumeOverlay.classList.remove('hidden');
     });
 }
@@ -369,14 +409,22 @@ function applySnapshot(snapshot, force = false, sampled = false) {
 function loadMedia(snapshot) {
   const seq = ++state.loadSeq;
   clearRecoveryTimers();
+  clearTimeout(state.userSeekCommitTimer);
+  state.userSeekCommitTimer = null;
   mediaRecovery.reset({ preparing: true });
   state.mediaPath = snapshot.media.path;
   state.mediaVersion = Number(snapshot.mediaVersion || 0);
   state.sourceLoading = true;
   state.mediaReady = false;
   state.fallbackUnavailable = false;
+  state.expectedSeek = null;
+  state.expectedPlay = false;
+  state.expectedPause = false;
+  state.seeking = false;
+  state.seekOrigin = '';
   clearCorrection(false);
-  setBuffering(false);
+  setBuffering(false, { resync: false });
+  armSeekGrace(STARTUP_GRACE_MS);
   ui.mediaTitle.textContent = snapshot.media.name || snapshot.media.path.split('/').pop();
   ui.emptyPlayer.classList.add('hidden');
   ui.resumeOverlay.classList.add('hidden');
@@ -396,6 +444,9 @@ function loadMedia(snapshot) {
     state.mediaReady = true;
     if (player.mode === 'libmedia') setNotice('兼容播放器已解析媒体，正在准备首帧。');
     else setNotice('媒体信息已就绪，正在准备播放。');
+
+    // Late joiners perform exactly one forced catch-up after metadata. Starting
+    // playback and rendering the first frame must not trigger a second hard seek.
     requestSync(true);
     refreshActiveLibraryItem();
   };
@@ -405,15 +456,22 @@ function loadMedia(snapshot) {
 function clearMedia() {
   state.loadSeq += 1;
   clearRecoveryTimers();
+  clearTimeout(state.userSeekCommitTimer);
+  state.userSeekCommitTimer = null;
   mediaRecovery.reset();
   state.mediaPath = '';
   state.mediaVersion = Number(state.lastSnapshot?.mediaVersion || state.mediaVersion + 1);
   state.sourceLoading = false;
   state.mediaReady = false;
   state.seeking = false;
+  state.seekOrigin = '';
+  state.seekGraceUntil = 0;
+  state.expectedSeek = null;
+  state.expectedPlay = false;
+  state.expectedPause = false;
   state.fallbackUnavailable = false;
   clearCorrection(false);
-  setBuffering(false);
+  setBuffering(false, { resync: false });
   player.pause();
   player.removeAttribute('src');
   player.load();
@@ -475,7 +533,8 @@ function applyPlayback(snapshot, force = false, sampled = false) {
 
   ui.rateSelect.value = String(desiredRate);
   const engine = player.mode === 'libmedia' ? ' · 兼容' : '';
-  if (state.buffering) ui.syncBadge.textContent = `缓冲中${engine} · 差 ${absDrift.toFixed(1)}s`;
+  if (state.seeking || player.seeking) ui.syncBadge.textContent = `正在跳转${engine}`;
+  else if (state.buffering) ui.syncBadge.textContent = `缓冲中${engine} · 差 ${absDrift.toFixed(1)}s`;
   else if (decision.reason === 'buffer-first') ui.syncBadge.textContent = `缓存优先${engine} · 暂不加速`;
   else if (decision.reason === 'runaway') ui.syncBadge.textContent = `异常漂移${engine} · 已重新对轴`;
   else if (absDrift <= 0.75) ui.syncBadge.textContent = `观感同步${engine}`;
@@ -483,7 +542,7 @@ function applyPlayback(snapshot, force = false, sampled = false) {
   else if (decision.action === 'rate' || decision.action === 'preserve') ui.syncBadge.textContent = `轻微校准${engine} · 差 ${absDrift.toFixed(1)}s`;
   else if (decision.action === 'seek') ui.syncBadge.textContent = `已重新对轴${engine}`;
   else ui.syncBadge.textContent = `观察偏差${engine} · ${absDrift.toFixed(1)}s`;
-  ui.syncBadge.classList.toggle('good', absDrift <= 0.75 && !state.buffering);
+  ui.syncBadge.classList.toggle('good', absDrift <= 0.75 && !state.buffering && !state.seeking);
 
   if (snapshot.playing) setProgrammaticPlay();
   else setProgrammaticPause();
@@ -499,19 +558,22 @@ function refreshActiveLibraryItem() {
 function clearRecoveryTimers() {
   clearTimeout(state.recoveryCheckTimer);
   clearTimeout(state.recoveryReloadTimer);
+  clearTimeout(state.stallGraceTimer);
   state.recoveryCheckTimer = null;
   state.recoveryReloadTimer = null;
+  state.stallGraceTimer = null;
 }
 
-function setBuffering(value) {
+function setBuffering(value, options = {}) {
   const next = Boolean(value);
+  const resync = options.resync !== false;
   if (state.buffering === next) return;
   state.buffering = next;
   syncReconciler.setBuffering(next);
   if (next) clearCorrection(true);
   ui.selfBuffering.textContent = localMediaStatus();
   if (state.socket?.connected) state.socket.emit('presence:buffering', { buffering: next });
-  if (!next) requestSync(false);
+  if (!next && resync) requestSync(false);
 }
 
 function scheduleRecoveryCheck() {
@@ -531,7 +593,22 @@ function scheduleRecoveryCheck() {
 }
 
 function beginMediaStall() {
-  if (!state.mediaPath || state.sourceLoading || player.paused || player.seeking) return;
+  if (!state.mediaPath || state.sourceLoading || player.paused || player.seeking || state.seeking) return;
+
+  // Native players often emit waiting/stalled while a Range seek is still being
+  // resolved. That is an expected consequence of seeking, not a reason to pause
+  // the other viewer. Re-check only after the seek/startup grace expires.
+  const remainingGrace = state.seekGraceUntil - Date.now();
+  if (remainingGrace > 0) {
+    clearTimeout(state.stallGraceTimer);
+    state.stallGraceTimer = setTimeout(() => {
+      state.stallGraceTimer = null;
+      if (!state.mediaPath || state.sourceLoading || player.paused || player.seeking || state.seeking) return;
+      if (player.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) beginMediaStall();
+    }, remainingGrace + 60);
+    return;
+  }
+
   const started = mediaRecovery.beginStall({ position: player.currentTime });
   if (started.ignored) return;
   clearCorrection(true);
@@ -635,21 +712,32 @@ player.addEventListener('fallbackunavailable', () => {
 player.addEventListener('firstrender', () => {
   if (!state.mediaPath) return;
   mediaRecovery.markRendered(player.currentTime);
+  armSeekGrace(FIRST_FRAME_GRACE_MS);
   ui.selfBuffering.textContent = localMediaStatus();
   if (player.mode === 'libmedia') setNotice('兼容播放器已输出首帧。');
   else setNotice('视频首帧已就绪。');
-  requestSync(true);
+
+  // The metadata-stage catch-up already placed a late joiner near the room
+  // timeline. A first frame is proof that playback started, not a request for a
+  // second disruptive hard seek.
+  requestSync(false);
 });
 
 player.addEventListener('play', () => {
   if (state.sourceLoading) return;
-  if (Date.now() <= state.expectedPlayUntil) { state.expectedPlayUntil = 0; return; }
+  if (state.expectedPlay) {
+    state.expectedPlay = false;
+    return;
+  }
   emitControl('player:play', mediaPayload({ position: player.currentTime }));
 });
 
 player.addEventListener('pause', () => {
   if (state.sourceLoading) return;
-  if (Date.now() <= state.expectedPauseUntil) { state.expectedPauseUntil = 0; return; }
+  if (state.expectedPause) {
+    state.expectedPause = false;
+    return;
+  }
   if (state.seeking || player.seeking) return;
   if (player.ended || !state.mediaPath) return;
   clearRecoveryTimers();
@@ -661,19 +749,56 @@ player.addEventListener('pause', () => {
 player.addEventListener('seeking', () => {
   state.seeking = true;
   mediaRecovery.invalidateStability();
+
+  const expected = state.expectedSeek;
+  const current = Number(player.currentTime || 0);
+  if (expected && Math.abs(current - expected.target) <= PROGRAMMATIC_SEEK_TOLERANCE) {
+    state.seekOrigin = 'programmatic';
+  } else {
+    // A real user scrub supersedes any old programmatic seek transaction.
+    state.expectedSeek = null;
+    state.seekOrigin = 'user';
+    clearTimeout(state.userSeekCommitTimer);
+    state.userSeekCommitTimer = null;
+  }
+
+  armSeekGrace(SEEK_GRACE_MS);
+  ui.selfBuffering.textContent = localMediaStatus();
+  ui.syncBadge.textContent = '正在跳转';
+  ui.syncBadge.classList.remove('good');
 });
+
+function commitUserSeek() {
+  state.userSeekCommitTimer = null;
+  if (state.sourceLoading || !state.mediaPath) return;
+  if (state.seeking || player.seeking) {
+    state.userSeekCommitTimer = setTimeout(commitUserSeek, SEEK_COMMIT_DELAY_MS);
+    return;
+  }
+  clearCorrection(false);
+  emitControl('player:seek', mediaPayload({ position: player.currentTime }));
+}
 
 player.addEventListener('seeked', () => {
   state.seeking = false;
+  ui.selfBuffering.textContent = localMediaStatus();
   if (state.sourceLoading || !state.mediaPath) return;
+
   const expected = state.expectedSeek;
-  if (expected && Date.now() <= expected.until && Math.abs(player.currentTime - expected.target) < 0.8) {
+  const current = Number(player.currentTime || 0);
+  if (expected && Math.abs(current - expected.target) <= PROGRAMMATIC_SEEK_TOLERANCE) {
+    // No short timeout: remote 4K Range seeks can legitimately take several
+    // seconds. Treat the completed seek as local implementation detail forever
+    // unless the user explicitly moved to a different target in the meantime.
     state.expectedSeek = null;
+    state.seekOrigin = '';
     return;
   }
+
   state.expectedSeek = null;
-  clearCorrection(false);
-  emitControl('player:seek', mediaPayload({ position: player.currentTime }));
+  state.seekOrigin = 'user';
+  clearTimeout(state.userSeekCommitTimer);
+  state.userSeekCommitTimer = setTimeout(commitUserSeek, SEEK_COMMIT_DELAY_MS);
 });
 
 player.addEventListener('ratechange', () => {
@@ -696,6 +821,8 @@ player.addEventListener('ratechange', () => {
 
 player.addEventListener('ended', () => {
   clearRecoveryTimers();
+  clearTimeout(state.userSeekCommitTimer);
+  state.userSeekCommitTimer = null;
   mediaRecovery.cancelStall({ keepAttempts: false });
   setBuffering(false);
   if (state.mediaPath) emitControl('player:pause', mediaPayload({ position: player.duration || player.currentTime }));
@@ -740,8 +867,12 @@ player.addEventListener('error', () => {
 });
 
 ui.resumeOverlay.addEventListener('click', () => {
-  state.expectedPlayUntil = Date.now() + 2500;
-  player.play().then(() => ui.resumeOverlay.classList.add('hidden')).catch(() => {});
+  // This click only unlocks/resumes the local browser. The room is already in a
+  // playing state, so never publish it as a new authoritative play command.
+  state.expectedPlay = true;
+  player.play()
+    .then(() => ui.resumeOverlay.classList.add('hidden'))
+    .catch(() => { state.expectedPlay = false; });
 });
 
 ui.waitBtn.addEventListener('click', () => emitControl('player:wait'));
