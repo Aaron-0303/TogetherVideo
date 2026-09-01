@@ -1,4 +1,4 @@
-/* TogetherVideo 3.2.5 browser-local media bridge.
+/* TogetherVideo 4.1 browser-local media bridge.
  * ArtPlayer owns the UI, but its native HTMLVideoElement still reads the logical
  * same-origin /api/media URL. Video bytes flow provider CDN -> browser only.
  */
@@ -98,9 +98,6 @@ async function resolveProviderUrl(mediaPath, fresh = false) {
 
 function providerHeaders(request) {
   const headers = new Headers();
-  // Always send a bounded Range and intentionally never forward If-Range from a
-  // previous signed URL. A stale validator can make a fresh 123 URL fall back to
-  // an HTTP 200 whole-file response.
   headers.set('Range', boundedMediaRange(request.headers.get('range')));
   return headers;
 }
@@ -133,7 +130,7 @@ function browserMediaResponse(upstream, mime) {
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Cache-Control', 'private, no-store');
   headers.set('X-TogetherVideo-Media-Mode', 'browser-service-worker');
-  headers.set('X-TogetherVideo-Media-Version', '3.2.5');
+  headers.set('X-TogetherVideo-Media-Version', '4.1');
   return new Response(upstream.body, {
     status: 206,
     statusText: upstream.statusText,
@@ -149,9 +146,6 @@ async function fetchVerifiedRange(request, mediaPath, source, allowRefresh = tru
   const failedRange = upstream.headers.get('content-range') || '';
   await upstream.body?.cancel().catch(() => {});
 
-  // Expired signed URLs, stale CDN validators and some redirect edges can all
-  // surface as 200/401/403/416. Resolve one fresh provider URL and repeat the
-  // exact logical browser request before giving up.
   if (allowRefresh) {
     sourceCache.delete(mediaPath);
     const freshSource = await resolveProviderUrl(mediaPath, true);
@@ -175,7 +169,7 @@ async function handleMedia(request, requestUrl) {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'Cache-Control': 'no-store',
-        'X-TogetherVideo-Media-Version': '3.2.5',
+        'X-TogetherVideo-Media-Version': '4.1',
       },
     });
   }
