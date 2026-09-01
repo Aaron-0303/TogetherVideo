@@ -174,7 +174,7 @@ A / B seek 到 target
 ```text
 设置
   ↓
-聊天记录
+聊天设置
   ↓
 清空聊天记录
 ```
@@ -267,11 +267,34 @@ HTMLVideoElement
 
 ---
 
-## 7. 设置
+## 7. 设置中心
 
-右上角“设置”目前包含三部分：
+右上角 **设置** 使用独立的两栏设置中心，不再把所有表单纵向堆在同一个页面。
 
-### WebDAV 媒体源
+桌面端结构：
+
+```text
+┌────────────────────── 空间设置 ──────────────────────┐
+│                                                     │
+├───────────────┬─────────────────────────────────────┤
+│ 设置分类      │ 当前分类内容                        │
+│               │                                     │
+│ WebDAV        │ WebDAV 地址                         │
+│ 媒体来源      │ 用户名 / 密码                       │
+│               │ 根目录                              │
+│ 站点设置      │ 测试连接 / 保存媒体源               │
+│ 访问与安全    │                                     │
+│               │                                     │
+│ 聊天设置      │                                     │
+│ 聊天记录      │                                     │
+└───────────────┴─────────────────────────────────────┘
+```
+
+左侧固定三个分类：
+
+### WebDAV
+
+用于管理媒体来源：
 
 ```text
 WebDAV 地址
@@ -282,13 +305,21 @@ WebDAV 地址
 
 服务端只使用这些信息读取目录、解析临时下载地址以及执行少量媒体探测。
 
-### 站点访问密码
+### 站点设置
 
-用于修改进入 TogetherVideo 的访问密码。
+用于修改进入 TogetherVideo 时使用的访问密码。
 
-### 聊天记录
+### 聊天设置
 
-提供 **清空聊天记录** 操作。
+用于管理聊天数据，目前提供：
+
+```text
+清空聊天记录
+```
+
+设置中心采用更大的可读字号：分类和表单正文约 `13–14px`，内容标题约 `18px`，输入框和按钮高度约 `42–44px`。
+
+窄屏设备会自动把左侧分类栏转换成顶部横向分类栏，右侧内容移动到下方，不会强行维持桌面两列。
 
 ---
 
@@ -351,20 +382,22 @@ Ctrl + Shift + R
 
 ```text
 server.js
-├─ src/http-routes.js        HTTP API / 媒体地址解析
-├─ src/socket-gateway.js     房间控制 / 聊天 / 聊天清空
-├─ src/room-coordinator.js   双人同步协调
-├─ src/watch-room.js         权威播放时间线
-├─ src/media-service.js      片库 / 临时直链 / 媒体探测
-├─ src/webdav.js             WebDAV 协议
-├─ public/index.html         4.1 主界面
-├─ public/styles.css         基础布局与主题
-├─ public/sidebar-readable.css 右侧可读字号覆盖
-├─ public/room-panel.js      房间 / 播放列表 / 聊天
-├─ public/app-3.1.js         播放同步客户端
-├─ public/artplayer-media.js ArtPlayer 与原生 video 适配
-├─ public/media-transport.js Service Worker 注册
-└─ public/sw.js              浏览器本地媒体桥
+├─ src/http-routes.js           HTTP API / 媒体地址解析
+├─ src/socket-gateway.js        房间控制 / 聊天 / 聊天清空
+├─ src/room-coordinator.js      双人同步协调
+├─ src/watch-room.js            权威播放时间线
+├─ src/media-service.js         片库 / 临时直链 / 媒体探测
+├─ src/webdav.js                WebDAV 协议
+├─ public/index.html            4.1 主界面
+├─ public/styles.css            基础布局与主题
+├─ public/sidebar-readable.css  右侧可读字号覆盖
+├─ public/settings-center.css   两栏设置中心
+├─ public/ui-shell.js           主题与设置分类切换
+├─ public/room-panel.js         房间 / 播放列表 / 聊天
+├─ public/app-3.1.js            播放同步客户端
+├─ public/artplayer-media.js    ArtPlayer 与原生 video 适配
+├─ public/media-transport.js    Service Worker 注册
+└─ public/sw.js                 浏览器本地媒体桥
 ```
 
 ---
@@ -375,6 +408,7 @@ server.js
 UI：全屏左播放器 + 右侧 房间/播放列表
 主题：明亮 / 黑暗
 身份：小杨 / 旭旭固定选择
+设置：左侧分类 + 右侧具体设置
 播放器：ArtPlayer 5.4.0
 聊天：实时聊天 + 设置中清空历史
 播放 / 暂停：双方同步
