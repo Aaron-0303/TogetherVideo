@@ -1,13 +1,13 @@
 (() => {
-  const video = document.getElementById('video');
+  const player = window.TogetherMediaPlayer;
+  const video = player?.video || document.getElementById('video');
   const notice = document.getElementById('playerNotice');
   const badge = document.getElementById('syncBadge');
-  const player = window.TogetherMediaPlayer || video;
   if (!video || !player || !notice || !badge) return;
 
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
-  video.preload = 'auto';
+  video.preload = 'metadata';
 
   let diagnosticSeq = 0;
 
@@ -59,6 +59,7 @@
         contentRange: response.headers.get('content-range') || '',
         contentLength: response.headers.get('content-length') || '',
         mode: response.headers.get('x-togethervideo-media-mode') || '',
+        version: response.headers.get('x-togethervideo-media-version') || '',
       };
       await response.body?.cancel().catch(() => {});
       return result;
@@ -70,7 +71,7 @@
   function describe(serverResult, bridge, mediaErrorCode) {
     const media = serverResult?.media || {};
     const probe = serverResult?.probe || {};
-    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2.2 已恢复 3.1.2 的稳定原生媒体管线。`];
+    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2.5 使用 ArtPlayer 控件，但真正解码仍由它内部的原生 HTMLVideoElement 完成；123 数据通过稳定的浏览器本地 Range/MIME bridge 读取。`];
 
     const serverBits = [];
     if (probe.headStatus) serverBits.push(`HEAD ${probe.headStatus}`);
@@ -89,13 +90,14 @@
     if (!bridge.active) {
       lines.push(`浏览器媒体桥未生效：${bridge.error || '未知原因'}。请确认 HTTPS 并强制刷新页面。`);
     } else if (bridge.status) {
-      lines.push(`浏览器桥接实测：HTTP ${bridge.status}${bridge.contentRange ? ` · ${bridge.contentRange}` : ''}${bridge.contentType ? ` · ${bridge.contentType}` : ''}。`);
+      const version = bridge.version ? ` · bridge ${bridge.version}` : '';
+      lines.push(`浏览器桥接实测：HTTP ${bridge.status}${bridge.contentRange ? ` · ${bridge.contentRange}` : ''}${bridge.contentType ? ` · ${bridge.contentType}` : ''}${version}。`);
       if (bridge.status !== 206 || !/^bytes\s/i.test(bridge.contentRange || '')) {
         lines.push('浏览器实际播放链路没有得到标准 206 Range；此时不要先怀疑视频编码。');
       } else if (!/^video\//i.test(bridge.contentType || '')) {
         lines.push('Range 正常，但桥接后的 MIME 仍不是 video/*，属于媒体桥响应头问题。');
       } else {
-        lines.push('浏览器实际链路已经得到标准 206 和 video/*；若仍失败，才继续检查 MP4 内部封装与 Codec。');
+        lines.push('ArtPlayer 内部 video 实际链路已经得到标准 206 和 video/*；若仍失败，才继续检查 MP4 内部封装与 Codec。');
       }
     } else {
       lines.push(`浏览器桥接自测失败：${bridge.error || '未知错误'}。`);
@@ -125,7 +127,7 @@
       if (seq !== diagnosticSeq) return;
       notice.textContent = describe(serverResult, bridge, code);
       notice.classList.add('error');
-      badge.textContent = player.mode === 'libmedia' ? '兼容播放失败 · 已诊断' : '播放失败 · 已诊断';
+      badge.textContent = '播放失败 · 已诊断';
       badge.classList.remove('good');
     } catch (error) {
       if (seq !== diagnosticSeq) return;
