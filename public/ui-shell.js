@@ -33,10 +33,16 @@
   applyTheme(preferredTheme());
 
   document.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-theme-toggle]');
-    if (!button) return;
-    const current = document.documentElement.dataset.theme || preferredTheme();
-    applyTheme(current === 'dark' ? 'light' : 'dark', { persist: true });
+    const themeButton = event.target.closest('[data-theme-toggle]');
+    if (themeButton) {
+      const current = document.documentElement.dataset.theme || preferredTheme();
+      applyTheme(current === 'dark' ? 'light' : 'dark', { persist: true });
+      return;
+    }
+
+    if (event.target.closest('[data-open-settings]')) {
+      document.getElementById('settingsBtn')?.click();
+    }
   });
 
   window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', (event) => {
