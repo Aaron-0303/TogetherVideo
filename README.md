@@ -1,300 +1,312 @@
 # TogetherVideo 4.1
 
-TogetherVideo 是一个固定双人使用的同步观影网站。
+TogetherVideo 是一个固定双人使用的同步观影网站。视频存放在 **123 网盘**，网站通过 **WebDAV** 浏览媒体目录；真正的视频数据由 123 CDN 直接发送到两个人各自的浏览器，Node 服务不转发视频正文。
 
-核心原则只有两条：
+![TogetherVideo 4.1 界面](docs/images/togethervideo-4.1.png)
 
-1. **同步播放控制和时间线**：播放、暂停、拖动、倍速、重新同步由房间统一协调。
-2. **媒体线路完全独立**：两个人各自在浏览器中向 123 云盘 / CDN 请求视频数据，一方缓冲不会阻塞另一方。
+## 功能
 
-Node 服务只负责登录、WebDAV 目录、临时媒体地址解析、Socket.IO 房间状态和聊天，**不会代理、缓存或转码视频正文**。
+- 固定双人房间，昵称只允许选择 **小杨 / 旭旭**
+- 播放、暂停、拖动、倍速同步
+- 两边缓存和网络线路独立，一方缓冲不会卡住另一方
+- 右侧 **房间 / 播放列表** 双 Tab
+- 123 网盘 WebDAV 媒体库
+- ArtPlayer 播放器
+- 房间实时聊天
+- 明亮 / 黑暗主题
+- 设置中心支持 WebDAV、站点密码和聊天记录管理
 
 ---
 
-## 1. 4.1 界面
+# 部署前需要准备什么
 
-桌面端采用“一起看”式布局：
+## 1. 一台服务器
+
+准备一台可以长期运行 Node.js 的 Linux 云服务器 / VPS，例如 Ubuntu 22.04 / 24.04。
+
+服务器主要负责：
+
+- 网站页面
+- 登录与站点设置
+- Socket.IO 双人同步
+- WebDAV 目录读取
+- 解析 123 临时媒体地址
+
+**视频正文不经过服务器**，因此服务器不需要承担视频转发带宽。
+
+推荐准备：
+
+- Linux 服务器
+- 公网 IP
+- Node.js 20+
+- Git
+- Nginx 或 Caddy
+- 一个域名
+- HTTPS 证书
+
+> 公网正式部署请使用 **HTTPS**。TogetherVideo 的浏览器媒体链路依赖 Service Worker，普通公网 HTTP 页面无法正常使用 Service Worker；`localhost` 是浏览器的特殊例外。
+
+## 2. 一个 123 网盘账号
+
+视频文件需要放在 123 网盘中，并准备可用的 **WebDAV** 访问方式。
+
+你需要能够获得：
 
 ```text
-┌──────────────────────── 顶部导航 ────────────────────────┐
-│ TogetherVideo 4.1 │ 固定双人房间 │ 在线 │ 主题 │ 设置     │
-├────────────────────────────────────────┬─────────────────┤
-│ 当前视频标题                           │ 房间 | 播放列表 │
-├────────────────────────────────────────┤─────────────────┤
-│                                        │ 房间            │
-│                                        │ - 双方状态      │
-│                                        │ - 同步状态      │
-│              ArtPlayer                 │ - 等等我        │
-│                                        │ - 重新同步      │
-│                                        │ - 播放速度      │
-│                                        │ - 实时聊天      │
-│                                        │                 │
-│                                        │ 播放列表        │
-│                                        │ - WebDAV 目录   │
-│                                        │ - 视频文件      │
-└────────────────────────────────────────┴─────────────────┘
+WebDAV 地址
+WebDAV 用户名
+WebDAV 密码 / 应用密码
+媒体根目录
 ```
 
-主观影区域直接占满浏览器剩余视口：
+这些信息之后直接在 TogetherVideo 的 **设置 → WebDAV** 中填写，不需要写进代码。
+
+## 3. 一个域名
+
+推荐把域名解析到服务器，例如：
 
 ```text
-100vw × (100vh - 顶栏高度)
+watch.example.com
+        ↓
+服务器公网 IP
 ```
 
-播放器占左侧主要空间，右侧固定为 **房间 / 播放列表** 两个 Tab。视频使用 `object-fit: contain` 保持原始比例，必要的黑边只出现在播放器内部，不会在页面外围留下大块空白。
+生产环境建议让 Nginx / Caddy 监听 `80 / 443`，TogetherVideo 自己只在服务器内部监听 `3000`。
 
-支持 **明亮 / 黑暗** 两套主题，主题偏好保存在浏览器本地。
+---
 
-登录页昵称不再自由输入，只允许选择：
+# 一、安装 TogetherVideo
+
+下面以 Ubuntu 为例。
+
+## 1. 安装 Node.js 20+
+
+先确认版本：
+
+```bash
+node -v
+npm -v
+```
+
+Node.js 需要：
+
+```text
+>= 20
+```
+
+如果服务器还没有 Node.js，可以使用你习惯的 Node.js 安装方式，例如 NodeSource、nvm 或系统软件源。
+
+## 2. 克隆项目
+
+```bash
+git clone https://github.com/Aaron-0303/TogetherVideo.git
+cd TogetherVideo
+```
+
+安装依赖：
+
+```bash
+npm install
+```
+
+## 3. 第一次启动
+
+建议先在终端测试运行：
+
+```bash
+HOST=127.0.0.1 \
+PORT=3000 \
+SITE_PASSWORD='请改成你自己的初始密码' \
+TRUST_PROXY=true \
+COOKIE_SECURE=true \
+npm start
+```
+
+看到类似：
+
+```text
+[TogetherVideo 4.1.0] listening on 127.0.0.1:3000
+```
+
+说明后端已经启动。
+
+主要环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | 服务监听地址；使用反向代理时推荐 `127.0.0.1` |
+| `PORT` | `3000` | TogetherVideo 端口 |
+| `SITE_PASSWORD` | `change-me` | 第一次登录使用的站点密码 |
+| `TRUST_PROXY` | `true` | 反向代理部署保持 `true` |
+| `COOKIE_SECURE` | `false` | HTTPS 生产环境建议设为 `true` |
+| `DATA_DIR` | `./data` | 设置和房间状态保存目录 |
+
+> 不要在公网部署时继续使用默认密码 `change-me`。
+
+---
+
+# 二、配置 Nginx 和 HTTPS
+
+## 1. Nginx 反向代理
+
+假设域名是：
+
+```text
+watch.example.com
+```
+
+Nginx 可以配置为：
+
+```nginx
+server {
+    listen 80;
+    server_name watch.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Socket.IO 需要 WebSocket，因此：
+
+```nginx
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+不要删掉。
+
+检查并重载 Nginx：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+## 2. 配置 HTTPS
+
+可以使用 Certbot、Caddy 或你现有的证书方案。
+
+使用 Certbot + Nginx 时，常见流程是：
+
+```bash
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d watch.example.com
+```
+
+完成后访问：
+
+```text
+https://watch.example.com
+```
+
+---
+
+# 三、让 TogetherVideo 后台运行
+
+推荐使用 systemd。
+
+创建：
+
+```bash
+sudo nano /etc/systemd/system/togethervideo.service
+```
+
+示例：
+
+```ini
+[Unit]
+Description=TogetherVideo
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/TogetherVideo
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=SITE_PASSWORD=请改成你自己的初始密码
+Environment=TRUST_PROXY=true
+Environment=COOKIE_SECURE=true
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+其中：
+
+```text
+User
+WorkingDirectory
+SITE_PASSWORD
+```
+
+请按你的服务器实际情况修改。
+
+启用服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now togethervideo
+```
+
+查看状态：
+
+```bash
+sudo systemctl status togethervideo
+```
+
+查看日志：
+
+```bash
+journalctl -u togethervideo -f
+```
+
+---
+
+# 四、第一次使用
+
+## 1. 打开网站
+
+浏览器访问：
+
+```text
+https://你的域名
+```
+
+登录页选择昵称：
 
 ```text
 小杨
+或
 旭旭
 ```
 
----
+然后输入站点访问密码进入房间。
 
-## 2. 房间与播放列表
+## 2. 配置 123 WebDAV
 
-### 房间
-
-“房间”Tab 显示：
-
-- 你 / TA 的在线状态
-- 当前同步状态
-- 双方缓冲状态
-- `等等我`
-- `重新同步`
-- 播放速度
-- 实时聊天
-
-### 播放列表
-
-“播放列表”Tab 直接展示 WebDAV 媒体库：
-
-- 文件夹浏览
-- 面包屑路径
-- 视频文件
-- 文件大小 / 类型
-- 当前播放视频高亮
-- 手动刷新
-
-选择视频后，会把该视频设为房间当前媒体，两个人加载同一个逻辑媒体路径，但各自独立请求实际视频数据。
-
----
-
-## 3. 同步机制
-
-### 播放 / 暂停
-
-播放和暂停属于房间级控制。
+进入右上角：
 
 ```text
-A 点击暂停
-    ↓
-TogetherVideo Server
-    ↓
-room:state
-   ↙     ↘
-A pause  B pause
+设置 → WebDAV
 ```
 
-播放时服务器会提供一个很短的共同 `startAt`，让两个浏览器尽量同时开始。
-
-这个 `startAt` 只用于时间对齐，**不会等待双方缓存一致**。
-
-### 拖动进度
-
-拖动等价于两个人同时把播放器拖到同一位置：
-
-```text
-A 拖到 30:00
-      ↓
-服务器广播 target = 30:00
-      ↓
-A currentTime = 30:00
-B currentTime = 30:00
-      ↓
-A 独立请求 Range
-B 独立请求 Range
-      ↓
-短 startAt 后继续播放
-```
-
-不会再执行“双方都缓存完成才能播放”的 Barrier。
-
-### 缓冲
-
-缓冲只作为状态显示：
-
-```text
-A 缓冲 → A 自己等待
-B 正常 → B 继续播放
-```
-
-不会因为一方 `waiting / stalled` 自动暂停另一方。
-
-### 后加入
-
-第二个人进入正在播放的房间时，不会暂停已经在看的用户。后加入者读取当前房间时间线，然后自行加载到对应位置。
-
-### 重新同步
-
-正常播放时不会因为轻微漂移不断 seek 或调临时倍速。
-
-只有主动点击 **重新同步** 时，才进行一次轻量对齐：
-
-```text
-共同 target
-   ↓
-A / B seek 到 target
-   ↓
-短 startAt
-   ↓
-继续播放
-```
-
----
-
-## 4. 聊天
-
-聊天复用现有 Socket.IO 房间连接。
-
-特性：
-
-- 双方实时收发
-- 单条最多 300 个字符
-- 服务器内存最多保留最近 80 条
-- 后加入者可以看到当前内存中的最近聊天记录
-- 不写数据库
-- 服务器重启后自动清空
-
-需要手动删除时：
-
-```text
-设置
-  ↓
-聊天设置
-  ↓
-清空聊天记录
-```
-
-清空后：
-
-- 服务器内存聊天历史立即删除
-- 两边当前页面同步清空
-- 后加入者也不会再看到旧记录
-
----
-
-## 5. 媒体链路
-
-4.1 使用 **ArtPlayer 5.4.0** 作为播放器 UI，真正解码仍由浏览器原生 `HTMLVideoElement` 完成。
-
-```text
-                    TogetherVideo Server
-                           │
-                   Socket.IO 控制
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-          Browser A                 Browser B
-              │                         │
-          ArtPlayer                 ArtPlayer
-              │                         │
-      HTMLVideoElement          HTMLVideoElement
-              │                         │
-       Service Worker            Service Worker
-              │                         │
-         Range A                    Range B
-              │                         │
-          123 CDN A                 123 CDN B
-```
-
-两个人共享的是：
-
-```text
-当前视频
-播放 / 暂停
-目标进度
-正式倍速
-房间时间线
-聊天消息
-```
-
-两个人不共享的是：
-
-```text
-浏览器缓存
-Range 请求
-CDN 连接
-临时签名 URL
-网络速度
-解码状态
-```
-
----
-
-## 6. Service Worker 与 Range
-
-播放器始终使用站内逻辑地址：
-
-```text
-/api/media?path=xxx.mp4
-```
-
-Node 通过 WebDAV 找到可供浏览器访问的临时 CDN 地址，然后返回重定向；视频正文不进入 Node。
-
-浏览器 Service Worker 负责：
-
-```text
-播放器请求
-   ↓
-限制 Range 大小（最大约 16 MiB）
-   ↓
-不转发旧 If-Range
-   ↓
-123 CDN
-   ↓
-要求真实 206 + Content-Range
-   ↓
-必要时修正 MIME / Content-Disposition
-   ↓
-HTMLVideoElement
-```
-
-如果临时地址失效或 Range 响应异常，会重新解析一次临时 URL 后重试。
-
----
-
-## 7. 设置中心
-
-右上角 **设置** 使用独立的两栏设置中心，不再把所有表单纵向堆在同一个页面。
-
-桌面端结构：
-
-```text
-┌────────────────────── 空间设置 ──────────────────────┐
-│                                                     │
-├───────────────┬─────────────────────────────────────┤
-│ 设置分类      │ 当前分类内容                        │
-│               │                                     │
-│ WebDAV        │ WebDAV 地址                         │
-│ 媒体来源      │ 用户名 / 密码                       │
-│               │ 根目录                              │
-│ 站点设置      │ 测试连接 / 保存媒体源               │
-│ 访问与安全    │                                     │
-│               │                                     │
-│ 聊天设置      │                                     │
-│ 聊天记录      │                                     │
-└───────────────┴─────────────────────────────────────┘
-```
-
-左侧固定三个分类：
-
-### WebDAV
-
-用于管理媒体来源：
+填写：
 
 ```text
 WebDAV 地址
@@ -303,29 +315,118 @@ WebDAV 地址
 根目录
 ```
 
-服务端只使用这些信息读取目录、解析临时下载地址以及执行少量媒体探测。
-
-### 站点设置
-
-用于修改进入 TogetherVideo 时使用的访问密码。
-
-### 聊天设置
-
-用于管理聊天数据，目前提供：
+建议先点击：
 
 ```text
-清空聊天记录
+测试连接
 ```
 
-设置中心采用更大的可读字号：分类和表单正文约 `13–14px`，内容标题约 `18px`，输入框和按钮高度约 `42–44px`。
+测试成功后再点击：
 
-窄屏设备会自动把左侧分类栏转换成顶部横向分类栏，右侧内容移动到下方，不会强行维持桌面两列。
+```text
+保存媒体源
+```
+
+配置只需要做一次，之后会保存在服务器的 `data` 目录中。
+
+## 3. 选择视频
+
+回到主界面右侧：
+
+```text
+播放列表
+```
+
+浏览 123 网盘目录并选择视频。
+
+选择后，该视频会成为房间当前视频，两个人都会收到同一个播放状态。
+
+## 4. 两个人进入房间
+
+另一台电脑 / 浏览器访问同一个地址，选择另外一个昵称进入即可。
+
+例如：
+
+```text
+浏览器 A：旭旭
+浏览器 B：小杨
+```
+
+右上角显示：
+
+```text
+2 / 2 在线
+```
+
+即可一起观看。
 
 ---
 
-## 8. 推荐视频格式
+# 五、怎么使用
 
-兼容性最稳定的组合：
+主界面右侧有两个区域：
+
+```text
+房间 | 播放列表
+```
+
+### 房间
+
+可以看到：
+
+- 小杨 / 旭旭在线状态
+- 当前播放状态
+- 双方缓冲状态
+- 等等我
+- 重新同步
+- 播放速度
+- 聊天
+
+### 播放列表
+
+用于浏览 WebDAV 媒体目录并切换视频。
+
+### 等等我
+
+需要临时停一下时点击，房间播放状态会同步暂停。
+
+### 重新同步
+
+如果两边播放位置明显错开，点击一次 **重新同步** 即可重新对齐。
+
+---
+
+# 六、同步机制简述
+
+TogetherVideo 只同步 **视频、播放 / 暂停、进度、倍速和时间线**；两个人的浏览器缓存、Range 请求和 CDN 下载完全独立。
+
+因此正常情况下：
+
+```text
+一方网络卡顿 → 只影响自己
+另一方网络正常 → 不需要等待对方缓存
+```
+
+视频数据路径是：
+
+```text
+123 CDN → 浏览器 A
+123 CDN → 浏览器 B
+```
+
+而不是：
+
+```text
+123 CDN → TogetherVideo 服务器 → 两个浏览器
+```
+
+所以服务器不承担视频转发流量。
+
+---
+
+# 七、推荐视频格式
+
+浏览器兼容性最稳定的是：
 
 ```text
 容器：MP4
@@ -337,87 +438,142 @@ Profile：Main / High
 Fast Start：开启
 ```
 
-检查视频：
+HEVC 能否播放取决于浏览器和系统解码能力。
 
-```powershell
+如果某个视频一直无法播放，可以先检查：
+
+```bash
 ffprobe -hide_banner "input.mp4"
-```
-
-HEVC 建议优先使用 `hvc1`。如果是 `hev1`，可以尝试无损重封装：
-
-```powershell
-ffmpeg -i "input.mp4" `
-  -map 0:v:0 -map "0:a?" `
-  -c copy `
-  -tag:v:0 hvc1 `
-  -movflags +faststart `
-  "output.hvc1.mp4"
 ```
 
 ---
 
-## 9. 部署
+# 八、更新项目
 
-需要 Node.js 20+：
+进入项目目录：
 
 ```bash
+cd /home/ubuntu/TogetherVideo
 git pull
 npm install
-npm start
+sudo systemctl restart togethervideo
 ```
 
-生产环境建议使用 HTTPS，因为 Service Worker 在公网环境需要安全上下文。
-
-升级前端后建议两个浏览器各执行一次：
+前端版本更新后，两个浏览器建议执行一次：
 
 ```text
 Ctrl + Shift + R
 ```
 
-如果仍然命中旧 Service Worker，可在浏览器开发者工具中注销旧 Worker 后重新打开页面。
+如果仍然看到旧界面，可在浏览器开发者工具中注销旧的 Service Worker 后重新刷新。
 
 ---
 
-## 10. 代码结构
+# 九、常见问题
+
+## WebDAV 测试失败
+
+优先检查：
 
 ```text
-server.js
-├─ src/http-routes.js           HTTP API / 媒体地址解析
-├─ src/socket-gateway.js        房间控制 / 聊天 / 聊天清空
-├─ src/room-coordinator.js      双人同步协调
-├─ src/watch-room.js            权威播放时间线
-├─ src/media-service.js         片库 / 临时直链 / 媒体探测
-├─ src/webdav.js                WebDAV 协议
-├─ public/index.html            4.1 主界面
-├─ public/styles.css            基础布局与主题
-├─ public/sidebar-readable.css  右侧可读字号覆盖
-├─ public/settings-center.css   两栏设置中心
-├─ public/ui-shell.js           主题与设置分类切换
-├─ public/room-panel.js         房间 / 播放列表 / 聊天
-├─ public/app-3.1.js            播放同步客户端
-├─ public/artplayer-media.js    ArtPlayer 与原生 video 适配
-├─ public/media-transport.js    Service Worker 注册
-└─ public/sw.js                 浏览器本地媒体桥
+WebDAV 地址
+用户名
+应用密码
+根目录
+```
+
+确认同一套账号能够正常访问 123 WebDAV。
+
+## 网站能打开，但视频一直加载
+
+优先检查：
+
+1. 网站是否通过 HTTPS 打开
+2. 浏览器 Service Worker 是否正常注册
+3. 123 WebDAV 是否还能解析媒体地址
+4. 视频编码是否被当前浏览器支持
+
+## 两个人能看视频，但同步不正常
+
+检查 Nginx 是否保留 WebSocket 相关配置：
+
+```nginx
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+## 升级以后还是旧界面
+
+执行：
+
+```text
+Ctrl + Shift + R
+```
+
+仍无效时注销旧 Service Worker 后重新加载页面。
+
+---
+
+# 数据保存位置
+
+默认目录：
+
+```text
+./data/
+```
+
+主要保存：
+
+```text
+settings.json
+watch-state.json
+```
+
+其中包含站点设置和 WebDAV 配置。部署时建议备份该目录，并限制其他用户读取权限。
+
+---
+
+# 端口
+
+默认 TogetherVideo：
+
+```text
+3000
+```
+
+推荐生产环境：
+
+```text
+公网开放：80 / 443
+3000：只监听 127.0.0.1，由 Nginx 反向代理
 ```
 
 ---
 
-## 4.1 当前状态
+# 快速部署检查表
 
-```text
-UI：全屏左播放器 + 右侧 房间/播放列表
-主题：明亮 / 黑暗
-身份：小杨 / 旭旭固定选择
-设置：左侧分类 + 右侧具体设置
-播放器：ArtPlayer 5.4.0
-聊天：实时聊天 + 设置中清空历史
-播放 / 暂停：双方同步
-拖动：共同 target，各自独立加载
-缓冲：互不阻塞
-后加入：不打断已有播放
-重新同步：手动轻量对齐
-视频正文：123 CDN → Browser
-Node 视频代理：不使用
-```
+部署前：
 
-**一条时间线，各自一条媒体线路。**
+- [ ] 一台 Linux 云服务器 / VPS
+- [ ] Node.js 20+
+- [ ] Git
+- [ ] 123 网盘账号
+- [ ] 已准备可用的 123 WebDAV
+- [ ] 域名已解析到服务器
+- [ ] Nginx / Caddy
+- [ ] HTTPS 已配置
+
+部署后：
+
+- [ ] `npm install` 完成
+- [ ] TogetherVideo 服务正常运行
+- [ ] HTTPS 可以访问
+- [ ] 小杨 / 旭旭可以登录
+- [ ] WebDAV 测试连接成功
+- [ ] 播放列表能看到视频
+- [ ] 两个浏览器显示 `2 / 2 在线`
+- [ ] 播放 / 暂停 / 拖动同步正常
+
+---
+
+**TogetherVideo 4.1：一条时间线，两条独立媒体线路。**
