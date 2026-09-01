@@ -22,9 +22,9 @@
       const container = options.container;
       if (!container) throw new Error('Artplayer container is required');
 
-      // app-3.1.js still provides the legacy <video> node as part of its stable DOM
-      // contract. ArtPlayer owns the real media element in 3.2.5, so retire the
-      // placeholder without changing the room client API.
+      // The room client keeps a bootstrap <video> node as a stable DOM contract.
+      // ArtPlayer owns the real media element, so retire the placeholder before
+      // assigning any source without changing the room API.
       if (legacyVideo) {
         try { legacyVideo.pause(); } catch {}
         try { legacyVideo.removeAttribute('src'); } catch {}
@@ -49,8 +49,8 @@
         mutex: false,
         volume: 1,
         setting: true,
-        // Room playback rate is authoritative and is controlled by TogetherVideo's
-        // synchronized rate selector. Do not expose a local-only ArtPlayer rate menu.
+        // Room playback rate is authoritative. Keep ArtPlayer's local-only rate
+        // menu disabled so one browser cannot silently leave the shared rate.
         playbackRate: false,
         aspectRatio: true,
         fullscreen: true,
@@ -61,7 +61,7 @@
         playsInline: true,
         lock: true,
         fastForward: false,
-        theme: '#ff5f78',
+        theme: '#6272ff',
       });
 
       this.video = this.art.video;
@@ -112,9 +112,8 @@
       this._emit('sourcechange', { source, resolved });
     }
 
-    // media-stability.js wraps this method. For logical /api/media sources the
-    // wrapper waits until MediaTransport has a controlling Service Worker before
-    // calling this real load, eliminating the cold-start 307 race from 3.2.1.
+    // media-stability.js wraps this method and waits for a controlling Service
+    // Worker before assigning logical /api/media sources.
     load() {
       const token = ++this.loadToken;
       this._loadError = null;
@@ -202,7 +201,5 @@
   }
 
   window.ArtplayerMedia = ArtplayerMedia;
-  // app-3.1.js intentionally keeps its old constructor name so the Barrier room
-  // logic stays untouched while the player implementation changes underneath it.
   window.HybridMedia = ArtplayerMedia;
 })();
