@@ -5,6 +5,8 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const indexSource = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+const uiSource = fs.readFileSync(path.join(root, 'public', 'ui-shell.js'), 'utf8');
+const styleSource = fs.readFileSync(path.join(root, 'public', 'styles.css'), 'utf8');
 const transportSource = fs.readFileSync(path.join(root, 'public', 'media-transport.js'), 'utf8');
 const adapterSource = fs.readFileSync(path.join(root, 'public', 'artplayer-media.js'), 'utf8');
 const stabilitySource = fs.readFileSync(path.join(root, 'public', 'media-stability.js'), 'utf8');
@@ -14,16 +16,25 @@ const routesSource = fs.readFileSync(path.join(root, 'src', 'http-routes.js'), '
 const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 const pkg = require('../package.json');
 
-test('3.2.5 uses ArtPlayer UI on top of the stable media transport', () => {
-  assert.equal(pkg.version, '3.2.5');
-  const transportAt = indexSource.indexOf('/media-transport.js?v=3.2.5');
+test('4.0 uses ArtPlayer UI on top of the stable media transport', () => {
+  assert.equal(pkg.version, '4.0.0');
+  const transportAt = indexSource.indexOf('/media-transport.js?v=4.0');
   const artRuntimeAt = indexSource.indexOf('/vendor/artplayer/artplayer.js?v=5.4.0');
-  const adapterAt = indexSource.indexOf('/artplayer-media.js?v=3.2.5');
-  const stabilityAt = indexSource.indexOf('/media-stability.js?v=3.2.5');
-  const appAt = indexSource.indexOf('/app-3.1.js?v=3.2.5-artplayer-stable');
+  const adapterAt = indexSource.indexOf('/artplayer-media.js?v=4.0');
+  const stabilityAt = indexSource.indexOf('/media-stability.js?v=4.0');
+  const appAt = indexSource.indexOf('/app-3.1.js?v=4.0');
   assert.ok(transportAt >= 0 && artRuntimeAt > transportAt && adapterAt > artRuntimeAt);
   assert.ok(stabilityAt > adapterAt && appAt > stabilityAt);
-  assert.doesNotMatch(indexSource, /\/hybrid-media\.js\?v=3\.2\.5/);
+  assert.doesNotMatch(indexSource, /\/hybrid-media\.js/);
+});
+
+test('4.0 shell provides persistent light and dark themes', () => {
+  assert.match(indexSource, /data-theme-toggle/);
+  assert.match(indexSource, /ui-shell\.js\?v=4\.0/);
+  assert.match(uiSource, /togethervideo-theme/);
+  assert.match(uiSource, /prefers-color-scheme: dark/);
+  assert.match(styleSource, /html\[data-theme="dark"\]/);
+  assert.match(styleSource, /--surface:/);
 });
 
 test('ArtPlayer adapter keeps the room client contract while using native video', () => {
@@ -37,7 +48,7 @@ test('ArtPlayer adapter keeps the room client contract while using native video'
 });
 
 test('media load waits for the Service Worker controller before ArtPlayer gets a source', () => {
-  assert.match(transportSource, /navigator\.serviceWorker\.register\('\/sw\.js\?v=3\.2\.5'/);
+  assert.match(transportSource, /navigator\.serviceWorker\.register\('\/sw\.js\?v=4\.0'/);
   assert.match(stabilitySource, /window\.MediaTransport\?\.ready\?\.\(\)/);
   assert.match(stabilitySource, /originalLoad\.call\(this\)/);
   assert.match(adapterSource, /this\.video\.src = resolved/);
