@@ -55,8 +55,8 @@ async function main() {
   registerHttpRoutes({ app, io, settings, room, mediaService, coordinator, appVersion });
   registerSocketGateway({ io, room, coordinator, mediaService });
 
-  const libmediaAvPlayerDir = path.join(process.cwd(), 'node_modules', '@libmedia', 'avplayer', 'dist', 'esm');
-  app.use('/vendor/libmedia/avplayer', express.static(libmediaAvPlayerDir, {
+  const artplayerDistDir = path.join(process.cwd(), 'node_modules', 'artplayer', 'dist');
+  app.use('/vendor/artplayer', express.static(artplayerDistDir, {
     etag: true,
     maxAge: '1d',
     setHeaders(res) { res.setHeader('Cache-Control', 'public, max-age=86400'); },
@@ -83,7 +83,7 @@ async function main() {
   server.listen(config.port, config.host, () => {
     console.log(`[TogetherVideo ${appVersion}] listening on ${config.host}:${config.port}`);
     console.log(`[TogetherVideo ${appVersion}] fixed room; max participants=${config.maxParticipants}`);
-    console.log(`[TogetherVideo ${appVersion}] restored stable native media pipeline`);
+    console.log(`[TogetherVideo ${appVersion}] ArtPlayer UI + stable browser-local media transport`);
     console.log(`[TogetherVideo ${appVersion}] media bytes are never proxied by this server`);
   });
 
