@@ -71,7 +71,7 @@
   function describe(serverResult, bridge, mediaErrorCode) {
     const media = serverResult?.media || {};
     const probe = serverResult?.probe || {};
-    const lines = [`${mediaErrorName(mediaErrorCode)}。3.2.5 使用 ArtPlayer 控件，但真正解码仍由它内部的原生 HTMLVideoElement 完成；123 数据通过稳定的浏览器本地 Range/MIME bridge 读取。`];
+    const lines = [`${mediaErrorName(mediaErrorCode)}。4.1 使用 ArtPlayer 控件，真正解码仍由内部原生 HTMLVideoElement 完成；123 数据通过浏览器本地 Range/MIME bridge 读取。`];
 
     const serverBits = [];
     if (probe.headStatus) serverBits.push(`HEAD ${probe.headStatus}`);
@@ -82,7 +82,7 @@
     lines.push(`123 服务端实测：${serverBits.join(' · ') || '无有效结果'}。`);
 
     if (probe.rangeVerified) {
-      lines.push('已真实验证 CDN 返回 HTTP 206 + Content-Range，不再用 HEAD 200 推断 Range 能力。');
+      lines.push('已真实验证 CDN 返回 HTTP 206 + Content-Range。');
     } else {
       lines.push('关键异常：没有真实拿到 206 + Content-Range。123 即使声明 Accept-Ranges，也不能视为实际 Range 可用。');
     }
@@ -97,7 +97,7 @@
       } else if (!/^video\//i.test(bridge.contentType || '')) {
         lines.push('Range 正常，但桥接后的 MIME 仍不是 video/*，属于媒体桥响应头问题。');
       } else {
-        lines.push('ArtPlayer 内部 video 实际链路已经得到标准 206 和 video/*；若仍失败，才继续检查 MP4 内部封装与 Codec。');
+        lines.push('ArtPlayer 内部 video 已得到标准 206 和 video/*；若仍失败，再继续检查 MP4 内部封装与 Codec。');
       }
     } else {
       lines.push(`浏览器桥接自测失败：${bridge.error || '未知错误'}。`);
