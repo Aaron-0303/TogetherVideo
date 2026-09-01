@@ -1,32 +1,53 @@
-# TogetherVideo 4.0
+# TogetherVideo 4.1
 
 只供两个人使用的固定房间同步观影网站。
 
-TogetherVideo 的核心原则是：**同步控制，不同步媒体线路。** 两个人共享当前视频、播放 / 暂停、跳转目标、正式倍速和房间权威时间线；浏览器缓存、Range 请求、CDN 连接、临时签名 URL、网络速度和解码状态则完全独立。
+TogetherVideo 的核心原则仍然是：**同步控制，不同步媒体线路。** 两个人共享当前视频、播放 / 暂停、跳转目标、正式倍速和房间权威时间线；浏览器缓存、Range 请求、CDN 连接、临时签名 URL、网络速度和解码状态完全独立。
 
-服务器不会代理、缓存或转码视频正文。服务端只负责 WebDAV 元数据、123 临时播放地址发现、房间状态和同步控制；真正的视频数据始终由 123 云盘 / CDN 直接发送到每一个浏览器。
+服务器不会代理、缓存或转码视频正文。真正的视频数据始终由 123 云盘 / CDN 直接发送到每一个浏览器。
 
-## 4.0：全新前端
+## 4.1：沉浸式观影界面
 
-4.0 对前端界面进行了完整重设计，但不改变已经稳定的媒体和同步架构。
+4.1 再次重构了前端布局。重点不是增加更多卡片，而是把页面重新组织成真正的“观影房间”。
 
-主要变化：
+桌面端结构：
 
-- 全新的统一视觉设计，不再使用旧版顶部栏、卡片、状态 pill 混搭布局
-- 支持 **明亮 / 黑暗** 两套完整主题
-- 主题选择保存在浏览器本地；没有手动选择时跟随系统主题
-- 桌面端采用统一侧栏 + 播放器工作区
-- 移动端片库变成抽屉式侧栏
-- 播放器成为页面唯一视觉中心
-- “自己 / 对方”整合为同一个观看状态区域，明确表达“控制同步、媒体独立”
-- WebDAV 与站点密码设置重新设计为统一设置面板
-- ArtPlayer 继续作为播放器 UI
+```text
+┌──────────────────── 顶部细导航 ────────────────────┐
+│ TogetherVideo 4.1 / 房间 / 连接 / 在线 / 主题 / 设置 │
+├──────────────────────────────────────┬─────────────┤
+│                                      │ 房间成员     │
+│                                      │             │
+│             大播放器                 │ 同步状态     │
+│                                      │             │
+│                                      │ 缓冲状态     │
+│                                      │             │
+│                                      │ 等等我       │
+│                                      │ 重新同步     │
+│                                      │             │
+│                                      │ 播放速度     │
+│                                      │ 房间动态     │
+├──────────────────────────────────────┴─────────────┤
+│ 媒体库默认隐藏，需要时从左侧抽屉展开                  │
+└────────────────────────────────────────────────────┘
+```
 
-主题切换只影响界面，不会重建播放器、重新获取视频地址或改变房间同步状态。
+4.1 的主要变化：
+
+- 播放器成为页面绝对视觉中心，不再被片库和多张状态卡分割
+- 右侧改成统一的 **房间侧栏**，集中显示成员、同步、缓冲和房间操作
+- 媒体库改成 **抽屉式 WebDAV Library**，平时不占用播放器宽度
+- 顶部导航压缩为一条细栏，只保留房间与连接相关信息
+- “等等我”“重新同步”和倍速统一放入右侧房间栏
+- 继续支持 **明亮 / 黑暗** 两套主题，布局完全一致
+- 桌面端优先沉浸观看；窄屏和手机端自动将右侧栏移动到播放器下方
+- 保留 ArtPlayer 5.4.0 和原有媒体链路，不为了换 UI 重写已经稳定的后端
+
+主题选择存储在浏览器本地；用户没有手动选择时跟随系统主题。
 
 ## 播放器与媒体结构
 
-4.0 使用 **ArtPlayer 5.4.0** 作为播放器 UI，底层仍由浏览器原生 `HTMLVideoElement` 解码。Service Worker 负责 123 临时直链、Range 和 MIME 兼容处理。
+4.1 使用 **ArtPlayer 5.4.0** 作为播放器界面，底层由浏览器原生 `HTMLVideoElement` 解码。
 
 ```text
                     TogetherVideo Server
@@ -70,18 +91,23 @@ CDN 连接
 解码状态
 ```
 
-因此 **A 缓冲不会让 B 暂停，B 缓冲也不会阻塞 A。**
+因此：
+
+```text
+A 缓冲 → A 自己等待
+B 正常 → B 继续播放
+```
+
+不会再因为一方缓存不足把另一方锁住。
 
 ## 同步原则
 
 ### 播放 / 暂停
 
-播放和暂停是房间级同步操作。
+播放和暂停是房间级同步控制。
 
 ```text
 A 点击暂停
-    ↓
-player:pause
     ↓
 TogetherVideo Server
     ↓
@@ -90,174 +116,124 @@ room:state
 A pause  B pause
 ```
 
-播放时服务器会给两个浏览器一个很短的共同 `startAt`，默认只预留约 500 ms 的控制传播时间。这个时间用于尽量让两边同时开始，而不是等待缓存。
-
-如果某一端网络慢，它只会在自己的播放器里短暂缓冲，不会把另一端一起锁住。
+播放时服务器会提供一个很短的共同 `startAt`，用于让两个浏览器尽量同时开始；它不是缓存屏障。
 
 ### 拖动进度条
 
-拖动相当于 **两个用户同时把各自的进度条拖到同一个位置**：
+拖动相当于两个用户同时把自己的播放器拖到同一时间点：
 
 ```text
 A 拖到 30:00
       ↓
-服务器广播目标 30:00
+服务器广播 30:00
       ↓
-┌─────────────────┬─────────────────┐
-│ Browser A       │ Browser B       │
-│ currentTime=30m │ currentTime=30m │
-│ 自己请求 Range   │ 自己请求 Range   │
-│ 自己加载         │ 自己加载         │
-└─────────────────┴─────────────────┘
+Browser A currentTime = 30:00
+Browser B currentTime = 30:00
       ↓
-短暂共同 startAt
+A 自己请求 Range
+B 自己请求 Range
       ↓
-各自继续播放
+短 startAt 后各自播放
 ```
 
-不会等待双方 `ready`，也不会比较两边 buffer 大小。
-
-如果拖动前房间处于暂停状态，则两边只同步到目标位置并保持暂停。
+不会等待双方 buffer 一致。
 
 ### 缓冲
 
-缓冲是每个浏览器自己的状态。
+缓冲只是一条 presence 状态：
 
 ```text
-A 网络正常                B 网络较慢
-A 正常播放                B waiting / stalled
-     │                         │
-     │                         └─ UI 显示“对方正在缓冲”
-     │
-     └─ 不暂停、不 seek、不等待 B
+presence:buffering
 ```
 
-`presence:buffering` 只用于状态展示，不会触发房间暂停或重新定位。
-
-### 后进入房间
-
-第二个人进入已经播放中的房间时，不会暂停第一个人：
+它可以显示在右侧“缓冲状态”中，但不会触发：
 
 ```text
-A 正在播放
-    ↓
-B 上线
-    ↓
-A 继续播放
-B 读取当前权威时间线
-    ↓
-B 自己加载并进入当前播放位置
+暂停另一方
+等待另一方 ready
+创建缓存 Barrier
+强制重复 seek
 ```
+
+### 后加入房间
+
+第二个人进入正在播放的房间时，第一个人不会被暂停。后加入者读取当前权威时间线并自己加载到当前播放位置。
 
 ### 漂移与重新同步
 
-客户端会低频测量房间时间线，用于显示明显差值，但：
+正常播放期间：
 
 ```text
 不使用临时倍速追赶
-不因为轻微偏差频繁 seek
+不因为小偏差频繁 seek
 不因为漂移自动暂停双方
 ```
 
 只有用户主动点击 **重新同步** 时，才执行一次轻量对齐：
 
 ```text
-重新同步
-   ↓
-服务器确定当前权威时间点
-   ↓
+确定共同 target
+      ↓
 A / B currentTime = target
-   ↓
-短暂 startAt
-   ↓
-两边各自播放
+      ↓
+短 startAt
+      ↓
+继续播放
 ```
-
-目标是观感同步，而不是强制两个浏览器的网络和缓存每一刻都完全一致。
 
 ## Service Worker / 123 Range
 
-播放器始终使用站内逻辑地址：
+播放器使用站内逻辑地址：
 
 ```text
 /api/media?path=xxx.mp4
 ```
 
-服务端通过 WebDAV 找到浏览器可以直接访问的 123 临时 CDN 地址并返回重定向，视频正文不经过 Node 服务。
+服务端通过 WebDAV 找到浏览器可直接访问的 123 临时 CDN 地址。视频正文不经过 Node 服务。
 
-Service Worker 在浏览器本地完成媒体兼容处理：
+浏览器本地 Service Worker 完成：
 
 ```text
 播放器 Range 请求
       ↓
-限制为有界 Range（最大约 16 MiB）
+有界 Range（最大约 16 MiB）
       ↓
 不转发旧 If-Range
       ↓
 123 CDN
       ↓
-必须得到 206 Partial Content + Content-Range
+必须得到 206 + Content-Range
       ↓
-必要时修正：
-application/octet-stream → video/mp4
-attachment → inline
+必要时修正 MIME / Content-Disposition
       ↓
-原生 HTMLVideoElement
+HTMLVideoElement
 ```
 
-如果临时 CDN 地址失效或 Range 响应异常，会重新解析地址后重试，而不是让服务器代理视频正文。
+临时 CDN 地址失效或返回异常 Range 时，Service Worker 会重新解析一次临时地址再重试。
 
 ## 当前代码结构
 
 ```text
 server.js
   ├─ 启动 / Session / 静态资源 / 生命周期
-  ├─ src/http-routes.js       HTTP API / 媒体地址解析
-  ├─ src/socket-gateway.js    Socket.IO 事件入口
-  ├─ src/room-coordinator.js  双人控制同步 / 短 startAt
-  ├─ src/watch-room.js        唯一权威播放时间线
-  ├─ src/media-service.js     片库、直链解析与媒体探测
-  ├─ src/webdav.js            WebDAV 协议与认证重定向
-  ├─ public/index.html        4.0 页面结构
-  ├─ public/styles.css        4.0 明亮 / 黑暗设计系统
-  ├─ public/ui-shell.js       主题与界面壳层交互
-  ├─ public/artplayer-media.js ArtPlayer 与原生 video 适配
+  ├─ src/http-routes.js        HTTP API / 媒体地址解析
+  ├─ src/socket-gateway.js     Socket.IO 事件入口
+  ├─ src/room-coordinator.js   双人控制同步 / 短 startAt
+  ├─ src/watch-room.js         唯一权威播放时间线
+  ├─ src/media-service.js      片库、直链解析与媒体探测
+  ├─ src/webdav.js             WebDAV 协议与认证重定向
+  ├─ public/index.html         4.1 沉浸式页面结构
+  ├─ public/styles.css         4.1 明亮 / 黑暗设计系统
+  ├─ public/ui-shell.js        主题切换
+  ├─ public/app-3.1.js         房间客户端逻辑
+  ├─ public/artplayer-media.js ArtPlayer / native video 适配
   ├─ public/media-transport.js Service Worker 启动时序
-  └─ public/sw.js             浏览器本地媒体桥
+  └─ public/sw.js              浏览器本地媒体桥
 ```
-
-`WatchRoom` 保存当前媒体、位置、播放状态、正式倍速和权威时间线。
-
-`RoomCoordinator` 只负责控制同步，不会把一端的 buffering 变成另一端的暂停事件。
-
-## 视频数据链路
-
-```text
-Browser A ─────────────────────────────→ 123 CDN
-    │                                      ↑
-    │ Socket.IO 控制                        │ Range A
-    ↓                                      │
-TogetherVideo Server                       │
-    ↑                                      │
-    │ Socket.IO 控制                        │
-    │                                      │
-Browser B ─────────────────────────────→ 123 CDN
-                                           ↑
-                                         Range B
-```
-
-服务器不会：
-
-- pipe 视频正文
-- 代理视频 Range
-- 缓存视频数据
-- 实时转码
-
-每个浏览器拥有自己的媒体线路和临时 CDN 连接。
 
 ## WebDAV 设置
 
-首次进入网站后打开 **设置**，填写：
+设置面板需要：
 
 ```text
 WebDAV 地址
@@ -266,13 +242,11 @@ WebDAV 地址
 根目录
 ```
 
-浏览器不会把 WebDAV 用户名和密码直接放进 `<video src>`。服务端使用认证信息进行目录读取和小型探测，并找到最终浏览器可访问的临时 CDN 地址。
+服务端仅使用认证信息读取目录、解析临时下载地址和执行小型探测。
 
-如果 WebDAV 只能返回“必须携带 Basic Auth 才能下载正文”的地址，而没有匿名 / 签名临时 URL，TogetherVideo 会拒绝把视频正文变成服务端代理流。
+如果 WebDAV 只能返回必须携带 Basic Auth 才能下载正文的地址，而没有匿名 / 签名临时 URL，TogetherVideo 不会把服务器变成视频代理。
 
 ## 视频兼容建议
-
-TogetherVideo 不做服务器实时转码，因此最终播放兼容性取决于容器、视频编码、像素格式、音频编码和浏览器设备。
 
 最稳妥的通用格式：
 
@@ -292,26 +266,13 @@ Fast Start：开启
 MP4 + H.264 8-bit yuv420p + AAC-LC + faststart
 ```
 
-### 检查媒体
+检查媒体：
 
 ```powershell
 ffprobe -hide_banner "input.mp4"
 ```
 
-重点查看：
-
-```text
-Video: h264 / hevc / av1 / vp9 ...
-codec_tag_string=hvc1 / hev1 ...
-pix_fmt=yuv420p / yuv420p10le / yuv422p ...
-Audio: aac / ac3 / eac3 / dts / truehd ...
-```
-
-### HEVC / H.265
-
-Apple 设备可以原生播放很多 HEVC。MP4 中推荐 `hvc1`。
-
-如果是 `hev1`，可以先尝试无损重封装：
+HEVC 建议优先使用 `hvc1`。如果文件为 `hev1`，可尝试无损重封装：
 
 ```powershell
 ffmpeg -i "input.mp4" `
@@ -321,49 +282,6 @@ ffmpeg -i "input.mp4" `
   -movflags +faststart `
   "output.hvc1.mp4"
 ```
-
-如果仍不能播放，再转成 H.264 + AAC。
-
-### 通用 H.264 转换
-
-CPU：
-
-```powershell
-ffmpeg -i "input.mkv" `
-  -map 0:v:0 -map "0:a:0?" `
-  -c:v libx264 `
-  -preset medium `
-  -crf 18 `
-  -profile:v high `
-  -pix_fmt yuv420p `
-  -c:a aac `
-  -b:a 192k `
-  -ac 2 `
-  -movflags +faststart `
-  "output.web.mp4"
-```
-
-NVIDIA NVENC：
-
-```powershell
-ffmpeg -i "input.mkv" `
-  -map 0:v:0 -map "0:a:0?" `
-  -c:v h264_nvenc `
-  -preset p5 `
-  -tune hq `
-  -rc vbr `
-  -cq 18 `
-  -b:v 0 `
-  -profile:v high `
-  -pix_fmt yuv420p `
-  -c:a aac `
-  -b:a 192k `
-  -ac 2 `
-  -movflags +faststart `
-  "output.web.mp4"
-```
-
-只修改文件后缀没有用，容器和编码必须真的兼容浏览器。
 
 ## 部署
 
@@ -375,24 +293,37 @@ npm install
 npm start
 ```
 
-4.0 继续使用 `artplayer@5.4.0`。生产环境建议使用 HTTPS，并由 Nginx / Caddy / 宝塔反向代理到 Node 服务。Service Worker 在公网环境需要安全上下文，因此不要直接使用普通 HTTP 域名。
-
-升级 4.0 后建议两个浏览器至少强制刷新一次。如果浏览器仍然运行旧媒体脚本，可以在开发者工具中注销旧 Service Worker 后重新打开页面。
-
-## 4.0 总结
+4.1 继续使用：
 
 ```text
-UI：全新设计系统 + 明亮 / 黑暗主题
+artplayer@5.4.0
+```
+
+生产环境建议使用 HTTPS。Service Worker 在公网环境需要安全上下文。
+
+从旧版本升级到 4.1 后，建议两个浏览器都执行一次强制刷新：
+
+```text
+Ctrl + Shift + R
+```
+
+如果浏览器仍然运行旧媒体桥，可以在开发者工具中注销旧 Service Worker 后重新打开页面。
+
+## 4.1 总结
+
+```text
+UI：顶部细导航 + 大播放器 + 右侧房间栏 + 抽屉片库
+主题：明亮 / 黑暗
 播放器：ArtPlayer 5.4.0
 播放：同步控制 + 短 startAt
 暂停：双方同步暂停
-拖动：双方到同一目标，各自独立加载
+拖动：共同 target，各自独立加载
 缓冲：谁卡谁自己缓冲
 后加入：不打断正在播放的人
-漂移：只提示，不自动 seek
+漂移：只提示
 重新同步：手动轻量对齐
 视频正文：123 CDN → Browser
-服务器代理视频：禁止
+Node 视频代理：禁止
 ```
 
-**控制需要同步，媒体线路必须独立；观感优先于数学意义上的绝对重合。**
+**一条时间线，各自一条媒体线路。**
