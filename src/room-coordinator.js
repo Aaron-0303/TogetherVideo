@@ -3,11 +3,10 @@ class RoomCoordinator {
     this.io = options.io;
     this.room = options.room;
     this.maxParticipants = Number(options.maxParticipants || 2);
-    this.startDelayMs = Number(options.startDelayMs || 900);
+    // Short shared runway: enough for the same control packet to reach both
+    // browsers, but never long enough to behave like a cache barrier.
+    this.startDelayMs = Number(options.startDelayMs || 500);
     this.participants = new Map();
-    this.barrier = null;
-    this.barrierSeq = 0;
-    this.releaseTimer = null;
   }
 
   participantList() {
@@ -15,7 +14,7 @@ class RoomCoordinator {
       id,
       nickname: item.nickname,
       buffering: [...item.buffering.values()].some(Boolean),
-      ready: Boolean(this.barrier?.ready.get(id)),
+      ready: false,
     }));
   }
 
@@ -23,7 +22,7 @@ class RoomCoordinator {
     this.io.emit('presence:update', {
       participants: this.participantList(),
       limit: this.maxParticipants,
-      barrierId: this.barrier?.id || 0,
+      barrierId: 0,
     });
   }
 
@@ -38,25 +37,17 @@ class RoomCoordinator {
         buffering: new Map(),
       });
     }
+
     const participant = this.participants.get(participantId);
     participant.nickname = nickname;
     participant.sockets.add(socketId);
     participant.buffering.set(socketId, false);
-
-    // A participant only joins readiness bookkeeping when an explicit resync is
-    // already in progress. Normal joining never pauses the other viewer.
-    if (this.barrier && !this.barrier.ready.has(participantId)) {
-      this.barrier.ready.set(participantId, false);
-    }
     return true;
   }
 
-  handleJoin(participantId) {
-    if (this.barrier && !this.barrier.ready.has(participantId)) {
-      this.barrier.ready.set(participantId, false);
-      this.broadcastBarrier('preparing');
-      return this.barrierPayload('preparing');
-    }
+  // Joining is presence-only. A late viewer must never pause the viewer who is
+  // already watching. Both media pipelines stay independent.
+  handleJoin() {
     return null;
   }
 
@@ -65,197 +56,81 @@ class RoomCoordinator {
     if (!participant) return;
     participant.sockets.delete(socketId);
     participant.buffering.delete(socketId);
-    if (!participant.sockets.size) {
-      this.participants.delete(participantId);
-      this.barrier?.ready.delete(participantId);
-    }
-    this.broadcastPresence();
-    this.maybeReleaseBarrier();
-  }
-
-  barrierPayload(phase = 'preparing', extra = {}) {
-    if (!this.barrier) return null;
-    return {
-      phase,
-      id: this.barrier.id,
-      target: this.barrier.target,
-      mediaVersion: this.barrier.mediaVersion,
-      reason: this.barrier.reason,
-      createdAt: this.barrier.createdAt,
-      participants: this.participantList().map((item) => ({
-        id: item.id,
-        nickname: item.nickname,
-        ready: item.ready,
-      })),
-      serverNow: Date.now(),
-      ...extra,
-    };
-  }
-
-  broadcastBarrier(phase = 'preparing', extra = {}) {
-    const payload = this.barrierPayload(phase, extra);
-    if (payload) this.io.emit('room:barrier', payload);
+    if (!participant.sockets.size) this.participants.delete(participantId);
     this.broadcastPresence();
   }
 
-  sendBarrier(socket) {
-    if (!this.barrier) return;
-    socket.emit('room:barrier', this.barrierPayload('preparing'));
+  // Kept as no-ops for the existing socket/client contract. 3.2.5 no longer
+  // uses readiness barriers for normal playback or manual re-alignment.
+  sendBarrier() {}
+  cancelBarrier() {}
+  markReady() { return false; }
+  maybeReleaseBarrier() {}
+
+  emitState(snapshot) {
+    if (snapshot) this.io.emit('room:state', snapshot);
+    return snapshot;
   }
 
-  clearReleaseTimer() {
-    clearTimeout(this.releaseTimer);
-    this.releaseTimer = null;
-  }
-
-  cancelBarrier(reason = 'cancelled', { broadcast = true } = {}) {
-    if (!this.barrier) return;
-    const previous = this.barrier;
-    this.clearReleaseTimer();
-    this.barrier = null;
-    if (broadcast) {
-      this.io.emit('room:barrier', {
-        phase: 'cancelled',
-        id: previous.id,
-        reason,
-        serverNow: Date.now(),
-      });
-    }
-    this.broadcastPresence();
-  }
-
-  // Barrier is intentionally reserved for an explicit re-alignment request.
-  // It must never be opened by ordinary buffering, play, seek, or late join.
-  beginBarrier(options = {}) {
+  schedulePlayAt(position, actor = '', reason = 'play', delayMs = this.startDelayMs) {
     const current = this.room.snapshot();
     if (!current.media) return null;
-
-    const requested = Number(options.target);
-    const target = Number.isFinite(requested) ? Math.max(0, requested) : current.position;
-    const mediaVersion = Number(options.mediaVersion ?? current.mediaVersion);
-    if (mediaVersion !== current.mediaVersion) return null;
-
-    this.clearReleaseTimer();
-
-    const prepared = this.room.apply('prepare', {
+    const target = Math.max(0, Number.isFinite(Number(position)) ? Number(position) : current.position);
+    const startAt = Date.now() + Math.max(0, Number(delayMs || 0));
+    return this.emitState(this.room.apply('play', {
       mediaPath: current.media.path,
       mediaVersion: current.mediaVersion,
       position: target,
-      reason: `barrier-${String(options.reason || 'sync')}`,
-    }, options.actor || '同步');
-    if (!prepared) return null;
-
-    this.barrier = {
-      id: ++this.barrierSeq,
-      target,
-      mediaVersion: current.mediaVersion,
-      reason: String(options.reason || 'sync'),
-      actor: String(options.actor || ''),
-      createdAt: Date.now(),
-      ready: new Map([...this.participants.keys()].map((id) => [id, false])),
-    };
-
-    this.io.emit('room:state', prepared);
-    this.broadcastBarrier('preparing');
-    return this.barrierPayload('preparing');
-  }
-
-  markReady(participantId, socketId, payload = {}) {
-    const participant = this.participants.get(participantId);
-    const barrier = this.barrier;
-    if (!participant || !participant.sockets.has(socketId) || !barrier) return false;
-    if (Number(payload.barrierId) !== barrier.id) return false;
-    if (Number(payload.mediaVersion) !== barrier.mediaVersion) return false;
-
-    participant.buffering.set(socketId, false);
-    barrier.ready.set(participantId, true);
-    this.broadcastBarrier('preparing');
-    this.maybeReleaseBarrier();
-    return true;
-  }
-
-  maybeReleaseBarrier() {
-    const barrier = this.barrier;
-    if (!barrier || this.releaseTimer || this.participants.size === 0) return;
-
-    const everyoneReady = [...this.participants.keys()].every((id) => barrier.ready.get(id) === true);
-    if (!everyoneReady) return;
-
-    const current = this.room.snapshot();
-    if (!current.media || current.mediaVersion !== barrier.mediaVersion) {
-      this.cancelBarrier('media-changed');
-      return;
-    }
-
-    const startAt = Date.now() + this.startDelayMs;
-    const released = this.room.apply('play', {
-      mediaPath: current.media.path,
-      mediaVersion: current.mediaVersion,
-      position: barrier.target,
       startAt,
-      reason: 'barrier-release',
-    }, '同步开始');
-    if (!released) return;
-
-    this.io.emit('room:state', released);
-    this.broadcastBarrier('starting', { startAt, rate: released.rate });
-
-    const releasedId = barrier.id;
-    this.releaseTimer = setTimeout(() => {
-      this.releaseTimer = null;
-      if (!this.barrier || this.barrier.id !== releasedId) return;
-      this.io.emit('room:barrier', {
-        phase: 'running',
-        id: releasedId,
-        startAt,
-        serverNow: Date.now(),
-      });
-      this.barrier = null;
-      this.broadcastPresence();
-    }, this.startDelayMs + 700);
+      reason,
+    }, actor));
   }
 
   requestPlay(payload = {}, actor = '') {
     const current = this.room.snapshot();
     if (!current.media || !this.room.matchesMedia(payload)) return null;
-    this.cancelBarrier('play');
     const position = Number(payload.position);
-    const started = this.room.apply('play', {
-      mediaPath: current.media.path,
-      mediaVersion: current.mediaVersion,
-      position: Number.isFinite(position) ? position : current.position,
-      reason: 'play',
-    }, actor);
-    if (started) this.io.emit('room:state', started);
-    return started;
+    return this.schedulePlayAt(
+      Number.isFinite(position) ? position : current.position,
+      actor,
+      'play',
+      this.startDelayMs,
+    );
+  }
+
+  requestPause(payload = {}, actor = '') {
+    if (!this.room.matchesMedia(payload)) return null;
+    return this.emitState(this.room.apply('pause', {
+      ...payload,
+      reason: 'pause',
+    }, actor));
   }
 
   requestSeek(payload = {}, actor = '') {
     const position = Number(payload.position);
     if (!Number.isFinite(position) || !this.room.matchesMedia(payload)) return null;
-    this.cancelBarrier('seek');
-    const moved = this.room.apply('seek', {
+
+    const before = this.room.snapshot();
+    const wasPlaying = Boolean(before.playing);
+
+    // A synchronized seek should feel exactly like both users manually dragging
+    // their own progress bars: issue one common target, let each browser fetch its
+    // own Range independently, and do not compare or wait for buffer amounts.
+    const pausedAtTarget = this.emitState(this.room.apply('pause', {
       ...payload,
       position,
-      reason: 'seek',
-    }, actor);
-    if (moved) this.io.emit('room:state', moved);
-    return moved;
-  }
-
-  requestPause(payload = {}, actor = '') {
-    if (!this.room.matchesMedia(payload)) return null;
-    this.cancelBarrier('manual-pause');
-    const paused = this.room.apply('pause', {
-      ...payload,
       reason: 'pause',
-    }, actor);
-    if (paused) this.io.emit('room:state', paused);
-    return paused;
+    }, actor));
+
+    if (!pausedAtTarget || !wasPlaying) return pausedAtTarget;
+
+    // Give both browsers a very small common runway to issue their local Range
+    // request, then start by server time. A slow browser may buffer locally, but
+    // it can never hold the other browser hostage.
+    return this.schedulePlayAt(position, actor, 'seek-resume', this.startDelayMs);
   }
 
   requestWait(actor = '') {
-    this.cancelBarrier('wait');
     const paused = this.room.apply('wait', { reason: 'wait' }, actor);
     if (paused) {
       this.io.emit('room:state', paused);
@@ -265,18 +140,28 @@ class RoomCoordinator {
   }
 
   requestResync(payload = {}, actor = '') {
+    // Automatic drift measurements are advisory only. They must never interrupt
+    // normal playback. Only the explicit "重新同步" button sends manual=true.
+    if (payload.manual !== true) return null;
+
     const current = this.room.snapshot();
-    if (!current.media || !current.playing || !this.room.matchesMedia(payload)) return null;
-    return this.beginBarrier({
-      target: current.position,
+    if (!current.media || !this.room.matchesMedia(payload)) return null;
+    const target = current.position;
+    const wasPlaying = Boolean(current.playing);
+
+    const paused = this.emitState(this.room.apply('pause', {
+      mediaPath: current.media.path,
       mediaVersion: current.mediaVersion,
-      reason: 'desync',
-      actor,
-    });
+      position: target,
+      reason: 'pause',
+    }, actor));
+    if (!paused || !wasPlaying) return paused;
+
+    return this.schedulePlayAt(target, actor, 'resync', this.startDelayMs + 250);
   }
 
-  // Buffering belongs to each browser's private media lane. Report it for UI only;
-  // never pause, seek, or create a room barrier because one viewer is buffering.
+  // Buffering is strictly per-viewer telemetry. There is intentionally no path
+  // from buffering -> pause/seek/barrier. Each browser owns its CDN/Range/cache.
   setBuffering(participantId, socketId, buffering) {
     const participant = this.participants.get(participantId);
     if (!participant || !participant.sockets.has(socketId)) return;
@@ -291,10 +176,7 @@ class RoomCoordinator {
     this.broadcastPresence();
   }
 
-  stop() {
-    this.clearReleaseTimer();
-    this.barrier = null;
-  }
+  stop() {}
 }
 
 module.exports = { RoomCoordinator };
