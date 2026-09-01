@@ -1,4 +1,9 @@
 (() => {
+  const sidebarTypography = document.createElement('link');
+  sidebarTypography.rel = 'stylesheet';
+  sidebarTypography.href = '/sidebar-readable.css?v=4.1';
+  document.head.appendChild(sidebarTypography);
+
   const STORAGE_KEY = 'togethervideo-theme';
   const THEMES = new Set(['light', 'dark']);
 
