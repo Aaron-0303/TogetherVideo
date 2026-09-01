@@ -2,23 +2,10 @@
   const ArtplayerClass = window.Artplayer;
   if (!ArtplayerClass) throw new Error('Artplayer runtime is not loaded');
 
-  const BRIDGE_SCRIPT = '/sw.js?v=3.2.1';
-  const BRIDGE_READY_TIMEOUT_MS = 12000;
-
   function safeDispatch(target, type, detail) {
     try {
       target.dispatchEvent(detail === undefined ? new Event(type) : new CustomEvent(type, { detail }));
     } catch {}
-  }
-
-  function logicalMediaPath(source) {
-    try {
-      const url = new URL(source, location.href);
-      if (url.origin !== location.origin || url.pathname !== '/api/media') return '';
-      return url.searchParams.get('path') || '';
-    } catch {
-      return '';
-    }
   }
 
   class ArtplayerMedia {
@@ -35,6 +22,9 @@
       const container = options.container;
       if (!container) throw new Error('Artplayer container is required');
 
+      // app-3.1.js still provides the legacy <video> node as part of its stable DOM
+      // contract. ArtPlayer owns the real media element in 3.2.5, so retire the
+      // placeholder without changing the room client API.
       if (legacyVideo) {
         try { legacyVideo.pause(); } catch {}
         try { legacyVideo.removeAttribute('src'); } catch {}
@@ -59,7 +49,9 @@
         mutex: false,
         volume: 1,
         setting: true,
-        playbackRate: true,
+        // Room playback rate is authoritative and is controlled by TogetherVideo's
+        // synchronized rate selector. Do not expose a local-only ArtPlayer rate menu.
+        playbackRate: false,
         aspectRatio: true,
         fullscreen: true,
         fullscreenWeb: true,
@@ -68,11 +60,12 @@
         miniProgressBar: true,
         playsInline: true,
         lock: true,
-        fastForward: true,
+        fastForward: false,
         theme: '#ff5f78',
       });
 
       this.video = this.art.video;
+      if (!this.video) throw new Error('Artplayer did not create a native HTMLVideoElement');
       this.video.id = 'video';
       this.video.preload = 'metadata';
       this.video.setAttribute('playsinline', '');
@@ -83,7 +76,10 @@
       } catch {}
 
       this._bindNativeEvents();
-      this.bridgeReady = this._ensureMediaBridgeReady();
+    }
+
+    _emit(type, detail) {
+      safeDispatch(this.events, type, detail);
     }
 
     _bindNativeEvents() {
@@ -96,49 +92,14 @@
       for (const type of passthrough) {
         this.video.addEventListener(type, () => {
           if (type === 'loadeddata' || type === 'playing') this._hasRenderedFrame = true;
-          safeDispatch(this.events, type);
+          this._emit(type);
         });
       }
 
       this.video.addEventListener('error', () => {
         if (!this.source) return;
-        safeDispatch(this.events, 'error');
+        this._emit('error');
       });
-    }
-
-    async _ensureMediaBridgeReady() {
-      if (!('serviceWorker' in navigator)) {
-        throw new Error('当前浏览器无法启用媒体 MIME 兼容层，请确认使用 HTTPS。');
-      }
-
-      const desiredScript = new URL(BRIDGE_SCRIPT, location.href).href;
-      const registration = await navigator.serviceWorker.register(BRIDGE_SCRIPT, { scope: '/' });
-      try { await registration.update(); } catch {}
-      await navigator.serviceWorker.ready;
-
-      const controlledByDesiredWorker = () => (
-        navigator.serviceWorker.controller?.scriptURL === desiredScript
-      );
-      if (controlledByDesiredWorker()) return registration;
-
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-          reject(new Error('3.2.1 媒体兼容层未能接管页面，请刷新后重试。'));
-        }, BRIDGE_READY_TIMEOUT_MS);
-
-        const onControllerChange = () => {
-          if (!controlledByDesiredWorker()) return;
-          clearTimeout(timer);
-          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-          resolve();
-        };
-
-        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        onControllerChange();
-      });
-
-      return registration;
     }
 
     _assignNativeSource(source, token) {
@@ -148,9 +109,12 @@
       this.video.src = resolved;
       this.video.preload = 'metadata';
       this.video.load();
-      safeDispatch(this.events, 'sourcechange', { source, resolved });
+      this._emit('sourcechange', { source, resolved });
     }
 
+    // media-stability.js wraps this method. For logical /api/media sources the
+    // wrapper waits until MediaTransport has a controlling Service Worker before
+    // calling this real load, eliminating the cold-start 307 race from 3.2.1.
     load() {
       const token = ++this.loadToken;
       this._loadError = null;
@@ -164,23 +128,7 @@
         return;
       }
 
-      const mediaPath = logicalMediaPath(source);
-      if (!mediaPath) {
-        this._assignNativeSource(source, token);
-        return;
-      }
-
-      // Keep the native media URL same-origin so the 3.2.1 Service Worker can
-      // normalize only the provider response headers. The worker forwards the
-      // browser's own Range request unchanged and never sends video bytes through
-      // the TogetherVideo server.
-      Promise.resolve(this.bridgeReady)
-        .then(() => this._assignNativeSource(source, token))
-        .catch((error) => {
-          if (token !== this.loadToken) return;
-          this._loadError = { code: 2, message: error?.message || String(error) };
-          safeDispatch(this.events, 'error');
-        });
+      this._assignNativeSource(source, token);
     }
 
     play() { return this.video.play(); }
@@ -227,9 +175,9 @@
       if (Number.isFinite(next) && next > 0) this.video.playbackRate = next;
     }
 
-    get volume() { return Number(this.video.volume || 0); }
+    get volume() { return Number(this.video.volume ?? 1); }
     set volume(value) {
-      const next = Math.max(0, Math.min(1, Number(value || 0)));
+      const next = Math.max(0, Math.min(1, Number(value ?? 1)));
       if (Number.isFinite(next)) this.video.volume = next;
     }
 
@@ -254,7 +202,7 @@
   }
 
   window.ArtplayerMedia = ArtplayerMedia;
-  // Keep the 3.1 room client API stable while the 3.2 player implementation is
-  // swapped underneath it. This alias can disappear when app-3.1.js is renamed.
+  // app-3.1.js intentionally keeps its old constructor name so the Barrier room
+  // logic stays untouched while the player implementation changes underneath it.
   window.HybridMedia = ArtplayerMedia;
 })();
