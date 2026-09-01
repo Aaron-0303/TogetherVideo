@@ -37,15 +37,18 @@ test('4.1 shell keeps persistent light and dark themes', () => {
   assert.match(styleSource, /--surface:/);
 });
 
-test('4.1 layout is player-first with a room sidebar and drawer library', () => {
+test('4.1 follows a player-left room-right watch-together layout', () => {
   assert.match(indexSource, /class="watch-layout"/);
   assert.match(indexSource, /class="stage-column"/);
+  assert.match(indexSource, /class="video-card"/);
   assert.match(indexSource, /class="room-sidebar"/);
+  assert.match(indexSource, /id="libraryToggle"[^>]*class="library-button"/);
   assert.match(indexSource, /class="library-drawer"/);
-  assert.match(indexSource, /控制同步，媒体线路独立/);
-  assert.match(styleSource, /grid-template-columns:minmax\(0,1fr\) 318px/);
-  assert.match(styleSource, /\.library-drawer\.open/);
-  assert.doesNotMatch(indexSource, /class="people-card"/);
+  assert.match(styleSource, /\.watch-layout\{[^}]*grid-template-columns:minmax\(0,1fr\) 310px/);
+  assert.match(styleSource, /\.room-sidebar\{[^}]*align-self:stretch/);
+  assert.match(styleSource, /\.room-sidebar\{[^}]*grid-template-rows:42px minmax\(0,1fr\) 34px/);
+  assert.doesNotMatch(indexSource, /library-handle/);
+  assert.doesNotMatch(indexSource, />ArtPlayer<|独立媒体线路/);
 });
 
 test('ArtPlayer adapter keeps the room client contract while using native video', () => {
