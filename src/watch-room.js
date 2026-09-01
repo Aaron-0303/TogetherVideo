@@ -34,8 +34,6 @@ function defaultState() {
 
 function effectivePosition(state, now = Date.now()) {
   if (!state.playing || !state.anchorAt) return Math.max(0, Number(state.position || 0));
-  // anchorAt may deliberately be in the future. This is how 3.1 schedules both
-  // browsers to start from the same media position at the same server time.
   const elapsed = Math.max(0, now - Number(state.anchorAt || now)) / 1000;
   return Math.max(0, Number(state.position || 0) + elapsed * Number(state.rate || 1));
 }
@@ -64,8 +62,6 @@ class WatchRoom {
       if (error.code !== 'ENOENT') console.warn('[room] resetting invalid watch state:', error.message);
     }
 
-    // Never resume an old process' running clock blindly after restart. Resume
-    // from a conservative saved point and require a new user/barrier start.
     if (this.state.playing) {
       const cappedNow = Math.min(Date.now(), Number(this.state.anchorAt || 0) + 30000);
       this.state.position = effectivePosition(this.state, cappedNow);
@@ -153,7 +149,6 @@ class WatchRoom {
 
       if (action === 'play') {
         const requestedStart = Number(payload.startAt);
-        // A scheduled start only needs a short runway for network/UI jitter.
         const startAt = Number.isFinite(requestedStart)
           ? Math.min(now + 5000, Math.max(now, requestedStart))
           : now;
@@ -177,13 +172,12 @@ class WatchRoom {
         this.state.anchorAt = 0;
         this.state.reason = String(payload.reason || 'prepare').slice(0, 40);
       } else if (action === 'seek') {
-        // Kept for compatibility with old persisted/tests. The 3.1 gateway uses
-        // `prepare` so a seek is always a pause-and-ready barrier, never a live jump.
         if (!Number.isFinite(position)) return null;
+        const wasPlaying = Boolean(this.state.playing);
         this.state.position = Math.max(0, position);
-        this.state.playing = false;
-        this.state.anchorAt = 0;
-        this.state.reason = 'seek';
+        this.state.playing = wasPlaying;
+        this.state.anchorAt = wasPlaying ? now : 0;
+        this.state.reason = String(payload.reason || 'seek').slice(0, 40);
       } else if (action === 'rate') {
         const rate = Number(payload.rate);
         if (!isUserPlaybackRate(rate)) return null;
