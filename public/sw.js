@@ -1,7 +1,6 @@
-/* TogetherVideo browser-local media bridge.
- * Video bytes flow directly from the provider CDN to this browser.
- * The TogetherVideo server still only resolves a redirect; it never receives,
- * proxies, buffers, or caches media bytes.
+/* TogetherVideo 3.2.5 browser-local media bridge.
+ * ArtPlayer owns the UI, but its native HTMLVideoElement still reads the logical
+ * same-origin /api/media URL. Video bytes flow provider CDN -> browser only.
  */
 const SOURCE_TTL_MS = 120000;
 const RESOLVER_TIMEOUT_MS = 12000;
@@ -59,6 +58,7 @@ async function resolveProviderUrl(mediaPath, fresh = false) {
   const now = Date.now();
   const cached = sourceCache.get(mediaPath);
   if (!fresh && cached && cached.expiresAt > now) return cached;
+
   const resolver = new URL('/api/media', self.location.origin);
   resolver.searchParams.set('path', mediaPath);
   resolver.searchParams.set('_swresolve', '1');
@@ -96,17 +96,30 @@ async function resolveProviderUrl(mediaPath, fresh = false) {
   throw new Error(`media resolver HTTP ${lastStatus || 0}`);
 }
 
-async function providerFetch(request, source) {
+function providerHeaders(request) {
   const headers = new Headers();
+  // Always send a bounded Range and intentionally never forward If-Range from a
+  // previous signed URL. A stale validator can make a fresh 123 URL fall back to
+  // an HTTP 200 whole-file response.
   headers.set('Range', boundedMediaRange(request.headers.get('range')));
+  return headers;
+}
+
+async function providerFetch(request, source) {
   return fetchWithTimeout(source.url, {
     method: 'GET',
-    headers,
+    headers: providerHeaders(request),
     mode: 'cors',
     credentials: 'omit',
     redirect: 'follow',
     cache: 'no-store',
   }, PROVIDER_HEADER_TIMEOUT_MS, request.signal);
+}
+
+function validPartialResponse(response) {
+  if (response.status !== 206) return false;
+  const contentRange = response.headers.get('content-range') || '';
+  return /^bytes\s+\d+-\d+\/(?:\d+|\*)$/i.test(contentRange);
 }
 
 function browserMediaResponse(upstream, mime) {
@@ -120,11 +133,32 @@ function browserMediaResponse(upstream, mime) {
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Cache-Control', 'private, no-store');
   headers.set('X-TogetherVideo-Media-Mode', 'browser-service-worker');
+  headers.set('X-TogetherVideo-Media-Version', '3.2.5');
   return new Response(upstream.body, {
-    status: upstream.status,
+    status: 206,
     statusText: upstream.statusText,
     headers,
   });
+}
+
+async function fetchVerifiedRange(request, mediaPath, source, allowRefresh = true) {
+  const upstream = await providerFetch(request, source);
+  if (validPartialResponse(upstream)) return { upstream, source };
+
+  const failedStatus = upstream.status;
+  const failedRange = upstream.headers.get('content-range') || '';
+  await upstream.body?.cancel().catch(() => {});
+
+  // Expired signed URLs, stale CDN validators and some redirect edges can all
+  // surface as 200/401/403/416. Resolve one fresh provider URL and repeat the
+  // exact logical browser request before giving up.
+  if (allowRefresh) {
+    sourceCache.delete(mediaPath);
+    const freshSource = await resolveProviderUrl(mediaPath, true);
+    return fetchVerifiedRange(request, mediaPath, freshSource, false);
+  }
+
+  throw new Error(`provider Range invalid: HTTP ${failedStatus}${failedRange ? ` ${failedRange}` : ''}`);
 }
 
 async function handleMedia(request, requestUrl) {
@@ -132,26 +166,17 @@ async function handleMedia(request, requestUrl) {
   if (!mediaPath) return new Response('Missing media path', { status: 400 });
   try {
     const forceFresh = requestUrl.searchParams.get('_fresh') === '1';
-    let source = await resolveProviderUrl(mediaPath, forceFresh);
-    let upstream = await providerFetch(request, source);
-    if (upstream.status === 401 || upstream.status === 403) {
-      await upstream.body?.cancel().catch(() => {});
-      sourceCache.delete(mediaPath);
-      source = await resolveProviderUrl(mediaPath, true);
-      upstream = await providerFetch(request, source);
-    }
-    if (!(upstream.ok || upstream.status === 206)) {
-      await upstream.body?.cancel().catch(() => {});
-      return new Response(`Provider media HTTP ${upstream.status}`, {
-        status: upstream.status || 502,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
-      });
-    }
-    return browserMediaResponse(upstream, source.mime);
+    const source = await resolveProviderUrl(mediaPath, forceFresh);
+    const verified = await fetchVerifiedRange(request, mediaPath, source, true);
+    return browserMediaResponse(verified.upstream, verified.source.mime);
   } catch (error) {
     return new Response(`Browser media bridge failed: ${error.message}`, {
       status: 502,
-      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-TogetherVideo-Media-Version': '3.2.5',
+      },
     });
   }
 }
