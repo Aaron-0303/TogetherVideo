@@ -52,7 +52,7 @@
 
     readyPromise = (async () => {
       try {
-        const registration = await navigator.serviceWorker.register('/sw.js?v=3.2.5', { scope: '/' });
+        const registration = await navigator.serviceWorker.register('/sw.js?v=4.0', { scope: '/' });
         registration.update().catch(() => {});
         await navigator.serviceWorker.ready;
         const controlled = await waitForController();
