@@ -31,6 +31,9 @@
   }
 
   applyTheme(preferredTheme());
+  document.addEventListener('DOMContentLoaded', () => {
+    applyTheme(document.documentElement.dataset.theme || preferredTheme());
+  }, { once: true });
 
   document.addEventListener('click', (event) => {
     const themeButton = event.target.closest('[data-theme-toggle]');
