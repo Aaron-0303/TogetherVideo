@@ -20,11 +20,11 @@ test('all server runtime dependencies are declared and resolvable', () => {
   }
 });
 
-test('stable browser fallback ships libmedia ESM assets', () => {
+test('3.2.5 ships the ArtPlayer browser distribution locally', () => {
   const pkg = require('../package.json');
-  assert.equal(pkg.dependencies?.['@libmedia/avplayer'], '1.3.1');
-  const esmDir = path.join(process.cwd(), 'node_modules', '@libmedia', 'avplayer', 'dist', 'esm');
-  const entry = path.join(esmDir, 'avplayer.js');
-  assert.ok(fs.existsSync(entry), 'libmedia AVPlayer ESM entry must exist after npm install');
-  assert.ok(fs.statSync(entry).size > 1000, 'libmedia browser entry should not be empty');
+  assert.equal(pkg.dependencies?.artplayer, '5.4.0');
+  const distDir = path.join(process.cwd(), 'node_modules', 'artplayer', 'dist');
+  const entry = path.join(distDir, 'artplayer.js');
+  assert.ok(fs.existsSync(entry), 'ArtPlayer browser entry must exist after npm install');
+  assert.ok(fs.statSync(entry).size > 10_000, 'ArtPlayer browser entry should not be empty');
 });
