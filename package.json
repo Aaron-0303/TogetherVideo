@@ -8,7 +8,7 @@
     "start": "node server.js",
     "dev": "NODE_ENV=development node --watch server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check server.js && node --check src/config.js && node --check src/http-routes.js && node --check src/identity.js && node --check src/media-service.js && node --check src/path-utils.js && node --check src/room-coordinator.js && node --check src/settings.js && node --check src/socket-gateway.js && node --check src/watch-room.js && node --check public/app-3.1.js && node --check public/ui-shell.js && node --check public/media-transport.js && node --check public/artplayer-media.js && node --check public/media-stability.js && node --check public/playback-unlock.js && node --check public/media-diagnostics.js && node --check public/sw.js && npm test"
+    "check": "node --check server.js && node --check src/config.js && node --check src/http-routes.js && node --check src/identity.js && node --check src/media-service.js && node --check src/path-utils.js && node --check src/room-coordinator.js && node --check src/settings.js && node --check src/socket-gateway.js && node --check src/watch-room.js && node --check public/app-3.1.js && node --check public/ui-shell.js && node --check public/room-panel.js && node --check public/media-transport.js && node --check public/artplayer-media.js && node --check public/media-stability.js && node --check public/playback-unlock.js && node --check public/media-diagnostics.js && node --check public/sw.js && npm test"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
