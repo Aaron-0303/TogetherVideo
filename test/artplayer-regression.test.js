@@ -6,6 +6,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const indexSource = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 const uiSource = fs.readFileSync(path.join(root, 'public', 'ui-shell.js'), 'utf8');
+const roomPanelSource = fs.readFileSync(path.join(root, 'public', 'room-panel.js'), 'utf8');
 const styleSource = fs.readFileSync(path.join(root, 'public', 'styles.css'), 'utf8');
 const transportSource = fs.readFileSync(path.join(root, 'public', 'media-transport.js'), 'utf8');
 const adapterSource = fs.readFileSync(path.join(root, 'public', 'artplayer-media.js'), 'utf8');
@@ -22,9 +23,10 @@ test('4.1 uses ArtPlayer UI on top of the stable media transport', () => {
   const artRuntimeAt = indexSource.indexOf('/vendor/artplayer/artplayer.js?v=5.4.0');
   const adapterAt = indexSource.indexOf('/artplayer-media.js?v=4.1');
   const stabilityAt = indexSource.indexOf('/media-stability.js?v=4.1');
+  const roomPanelAt = indexSource.indexOf('/room-panel.js?v=4.1');
   const appAt = indexSource.indexOf('/app-3.1.js?v=4.1');
   assert.ok(transportAt >= 0 && artRuntimeAt > transportAt && adapterAt > artRuntimeAt);
-  assert.ok(stabilityAt > adapterAt && appAt > stabilityAt);
+  assert.ok(stabilityAt > adapterAt && roomPanelAt > stabilityAt && appAt > roomPanelAt);
   assert.doesNotMatch(indexSource, /\/hybrid-media\.js/);
 });
 
@@ -37,18 +39,23 @@ test('4.1 shell keeps persistent light and dark themes', () => {
   assert.match(styleSource, /--surface:/);
 });
 
-test('4.1 follows a player-left room-right watch-together layout', () => {
-  assert.match(indexSource, /class="watch-layout"/);
-  assert.match(indexSource, /class="stage-column"/);
-  assert.match(indexSource, /class="video-card"/);
-  assert.match(indexSource, /class="room-sidebar"/);
-  assert.match(indexSource, /id="libraryToggle"[^>]*class="library-button"/);
-  assert.match(indexSource, /class="library-drawer"/);
-  assert.match(styleSource, /\.watch-layout\{[^}]*grid-template-columns:minmax\(0,1fr\) 310px/);
-  assert.match(styleSource, /\.room-sidebar\{[^}]*align-self:stretch/);
-  assert.match(styleSource, /\.room-sidebar\{[^}]*grid-template-rows:42px minmax\(0,1fr\) 34px/);
-  assert.doesNotMatch(indexSource, /library-handle/);
-  assert.doesNotMatch(indexSource, />ArtPlayer<|独立媒体线路/);
+test('4.1 fills the viewport with player-left and room-or-playlist right tabs', () => {
+  assert.match(indexSource, /id="roomTabBtn"/);
+  assert.match(indexSource, /id="playlistTabBtn"/);
+  assert.match(indexSource, /id="roomTabPanel"/);
+  assert.match(indexSource, /id="playlistTabPanel"/);
+  assert.match(indexSource, /id="chatForm"/);
+  assert.match(indexSource, /id="chatMessages"/);
+  assert.match(indexSource, /id="libraryList"/);
+  assert.match(roomPanelSource, /setSidebarTab\('playlist'\)/);
+  assert.match(roomPanelSource, /chat:history/);
+  assert.match(roomPanelSource, /chat:message/);
+  assert.match(styleSource, /\.watch-layout\{[^}]*width:100vw[^}]*height:calc\(100vh - 52px\)/);
+  assert.match(styleSource, /grid-template-columns:minmax\(0,1fr\) 340px/);
+  assert.match(styleSource, /\.video-shell\{[^}]*height:100%/);
+  assert.match(styleSource, /\.room-sidebar\{[^}]*height:100%/);
+  assert.doesNotMatch(styleSource, /width:min\(1760px,100%\)/);
+  assert.doesNotMatch(indexSource, /library-drawer|library-handle|>ArtPlayer<|独立媒体线路/);
 });
 
 test('ArtPlayer adapter keeps the room client contract while using native video', () => {
