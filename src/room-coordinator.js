@@ -4,12 +4,10 @@ class RoomCoordinator {
     this.room = options.room;
     this.maxParticipants = Number(options.maxParticipants || 2);
     this.startDelayMs = Number(options.startDelayMs || 900);
-    this.bufferingDelayMs = Number(options.bufferingDelayMs || 1500);
     this.participants = new Map();
     this.barrier = null;
     this.barrierSeq = 0;
     this.releaseTimer = null;
-    this.bufferingTimer = null;
   }
 
   participantList() {
@@ -45,35 +43,19 @@ class RoomCoordinator {
     participant.sockets.add(socketId);
     participant.buffering.set(socketId, false);
 
+    // A participant only joins readiness bookkeeping when an explicit resync is
+    // already in progress. Normal joining never pauses the other viewer.
     if (this.barrier && !this.barrier.ready.has(participantId)) {
       this.barrier.ready.set(participantId, false);
     }
     return true;
   }
 
-  handleJoin(participantId, nickname) {
-    const current = this.room.snapshot();
-    if (
-      this.participants.size >= this.maxParticipants
-      && current.media
-      && current.playing
-      && !this.barrier
-    ) {
-      // Joining an already-running movie is a synchronization event. Pause the
-      // room once, let both browsers buffer the same target, then restart them
-      // together. This is intentionally disruptive once instead of continuously
-      // chasing the late joiner with seeks/rate changes.
-      return this.beginBarrier({
-        target: current.position,
-        mediaVersion: current.mediaVersion,
-        reason: 'join',
-        actor: nickname || participantId,
-      });
-    }
-
+  handleJoin(participantId) {
     if (this.barrier && !this.barrier.ready.has(participantId)) {
       this.barrier.ready.set(participantId, false);
       this.broadcastBarrier('preparing');
+      return this.barrierPayload('preparing');
     }
     return null;
   }
@@ -88,9 +70,6 @@ class RoomCoordinator {
       this.barrier?.ready.delete(participantId);
     }
     this.broadcastPresence();
-
-    // If a viewer leaves during a barrier, do not strand the remaining viewer.
-    // The barrier can release as soon as every still-connected participant is ready.
     this.maybeReleaseBarrier();
   }
 
@@ -129,11 +108,6 @@ class RoomCoordinator {
     this.releaseTimer = null;
   }
 
-  clearBufferingTimer() {
-    clearTimeout(this.bufferingTimer);
-    this.bufferingTimer = null;
-  }
-
   cancelBarrier(reason = 'cancelled', { broadcast = true } = {}) {
     if (!this.barrier) return;
     const previous = this.barrier;
@@ -150,6 +124,8 @@ class RoomCoordinator {
     this.broadcastPresence();
   }
 
+  // Barrier is intentionally reserved for an explicit re-alignment request.
+  // It must never be opened by ordinary buffering, play, seek, or late join.
   beginBarrier(options = {}) {
     const current = this.room.snapshot();
     if (!current.media) return null;
@@ -160,7 +136,6 @@ class RoomCoordinator {
     if (mediaVersion !== current.mediaVersion) return null;
 
     this.clearReleaseTimer();
-    this.clearBufferingTimer();
 
     const prepared = this.room.apply('prepare', {
       mediaPath: current.media.path,
@@ -212,8 +187,6 @@ class RoomCoordinator {
       return;
     }
 
-    // Leave enough runway for the release packet to reach both browsers. Clients
-    // use serverNow/startAt to convert this to a local timer.
     const startAt = Date.now() + this.startDelayMs;
     const released = this.room.apply('play', {
       mediaPath: current.media.path,
@@ -245,24 +218,29 @@ class RoomCoordinator {
   requestPlay(payload = {}, actor = '') {
     const current = this.room.snapshot();
     if (!current.media || !this.room.matchesMedia(payload)) return null;
+    this.cancelBarrier('play');
     const position = Number(payload.position);
-    return this.beginBarrier({
-      target: Number.isFinite(position) ? position : current.position,
+    const started = this.room.apply('play', {
+      mediaPath: current.media.path,
       mediaVersion: current.mediaVersion,
+      position: Number.isFinite(position) ? position : current.position,
       reason: 'play',
-      actor,
-    });
+    }, actor);
+    if (started) this.io.emit('room:state', started);
+    return started;
   }
 
   requestSeek(payload = {}, actor = '') {
     const position = Number(payload.position);
     if (!Number.isFinite(position) || !this.room.matchesMedia(payload)) return null;
-    return this.beginBarrier({
-      target: position,
-      mediaVersion: Number(payload.mediaVersion),
+    this.cancelBarrier('seek');
+    const moved = this.room.apply('seek', {
+      ...payload,
+      position,
       reason: 'seek',
-      actor,
-    });
+    }, actor);
+    if (moved) this.io.emit('room:state', moved);
+    return moved;
   }
 
   requestPause(payload = {}, actor = '') {
@@ -297,51 +275,24 @@ class RoomCoordinator {
     });
   }
 
+  // Buffering belongs to each browser's private media lane. Report it for UI only;
+  // never pause, seek, or create a room barrier because one viewer is buffering.
   setBuffering(participantId, socketId, buffering) {
     const participant = this.participants.get(participantId);
     if (!participant || !participant.sockets.has(socketId)) return;
     participant.buffering.set(socketId, Boolean(buffering));
     this.broadcastPresence();
-
-    if (!buffering) {
-      if (![...this.participants.values()].some((item) => [...item.buffering.values()].some(Boolean))) {
-        this.clearBufferingTimer();
-      }
-      return;
-    }
-
-    if (this.barrier || this.bufferingTimer || this.participants.size < this.maxParticipants) return;
-    const current = this.room.snapshot();
-    if (!current.media || !current.playing) return;
-
-    this.bufferingTimer = setTimeout(() => {
-      this.bufferingTimer = null;
-      if (this.barrier) return;
-      const stillBuffering = [...this.participants.values()]
-        .some((item) => [...item.buffering.values()].some(Boolean));
-      const latest = this.room.snapshot();
-      if (!stillBuffering || !latest.media || !latest.playing) return;
-      this.beginBarrier({
-        target: latest.position,
-        mediaVersion: latest.mediaVersion,
-        reason: 'buffering',
-        actor: '缓冲保护',
-      });
-    }, this.bufferingDelayMs);
   }
 
   resetBuffering() {
-    this.clearBufferingTimer();
     for (const participant of this.participants.values()) {
       for (const socketId of participant.buffering.keys()) participant.buffering.set(socketId, false);
     }
-    this.cancelBarrier('reset', { broadcast: false });
     this.broadcastPresence();
   }
 
   stop() {
     this.clearReleaseTimer();
-    this.clearBufferingTimer();
     this.barrier = null;
   }
 }
