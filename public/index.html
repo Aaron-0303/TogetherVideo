@@ -1,73 +1,105 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#0b0d12" />
-  <title>TogetherVideo 3.2.5</title>
-  <link rel="stylesheet" href="/styles.css?v=3.2.5" />
+  <meta name="theme-color" content="#f3f5f8" />
+  <meta name="color-scheme" content="light dark" />
+  <title>TogetherVideo 4.0</title>
+  <link rel="stylesheet" href="/styles.css?v=4.0" />
+  <script src="/ui-shell.js?v=4.0"></script>
 </head>
 <body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+
   <div id="loginLayer" class="login-layer hidden">
+    <button class="theme-fab" type="button" data-theme-toggle aria-label="切换主题">
+      <span data-theme-icon>☾</span><span data-theme-label>黑暗</span>
+    </button>
     <form id="loginForm" class="login-card">
-      <div class="logo">♥</div>
-      <p class="eyebrow">TOGETHER · TWO PEOPLE ONLY</p>
-      <h1>一起看，就在这一个房间</h1>
-      <p class="muted">没有房间码，没有创建/加入。登录以后永远进入同一个双人观影空间。</p>
-      <label>你的昵称<input id="nicknameInput" maxlength="20" autocomplete="nickname" placeholder="例如：旭旭" required /></label>
-      <label>访问密码<input id="passwordInput" type="password" autocomplete="current-password" placeholder="首次部署默认 change-me" required /></label>
-      <button class="primary wide" type="submit">进入影院</button>
+      <div class="login-brand">
+        <div class="brand-mark">TV</div>
+        <div><strong>TogetherVideo</strong><span>4.0</span></div>
+      </div>
+      <div class="login-copy">
+        <span class="kicker">PRIVATE WATCH ROOM</span>
+        <h1>两个人，一条时间线。<br />各自一条媒体线路。</h1>
+        <p>同步播放、暂停与进度，缓存和网络互不拖累。登录后直接进入固定的双人观影空间。</p>
+      </div>
+      <div class="login-fields">
+        <label><span>昵称</span><input id="nicknameInput" maxlength="20" autocomplete="nickname" placeholder="例如：旭旭" required /></label>
+        <label><span>访问密码</span><input id="passwordInput" type="password" autocomplete="current-password" placeholder="输入站点访问密码" required /></label>
+      </div>
+      <button class="primary wide login-submit" type="submit">进入观影空间 <span>→</span></button>
       <p id="loginError" class="error"></p>
+      <div class="login-foot"><span>ArtPlayer 5.4</span><span>Independent media lanes</span><span>123 CDN direct</span></div>
     </form>
   </div>
 
   <div id="app" class="app hidden">
-    <header class="topbar">
-      <div class="brand"><span>♥</span><strong>TogetherVideo</strong><small>3.2.5</small></div>
-      <div class="top-actions">
-        <span id="socketBadge" class="pill">连接中</span>
-        <span id="onlineBadge" class="pill">0 / 2 在线</span>
-        <button id="libraryToggle" class="ghost mobile-only" type="button">片库</button>
-        <button id="settingsBtn" class="ghost" type="button">设置</button>
-        <button id="logoutBtn" class="ghost" type="button">退出</button>
+    <aside id="libraryPanel" class="sidebar library-panel">
+      <div class="sidebar-brand">
+        <div class="brand-mark small">TV</div>
+        <div class="brand-copy"><strong>TogetherVideo</strong><span>Private room · 4.0</span></div>
+        <button id="closeLibraryBtn" class="icon-button mobile-only" type="button" aria-label="关闭片库">×</button>
       </div>
-    </header>
 
-    <main class="layout">
-      <aside id="libraryPanel" class="panel library-panel">
-        <div class="panel-head">
-          <div><p class="eyebrow">WEBDAV LIBRARY</p><h2>片库</h2></div>
-          <button id="closeLibraryBtn" class="icon-btn mobile-only" type="button">×</button>
+      <div class="sidebar-section library-section">
+        <div class="section-title-row">
+          <div><span class="kicker">LIBRARY</span><h2>片库</h2></div>
+          <button id="refreshLibraryBtn" class="icon-button" type="button" title="刷新片库">↻</button>
         </div>
         <div id="breadcrumbs" class="breadcrumbs"></div>
-        <div class="library-toolbar">
-          <span id="libraryStatus" class="muted compact">正在读取...</span>
-          <button id="refreshLibraryBtn" class="icon-btn" type="button" title="刷新">↻</button>
-        </div>
+        <div class="library-meta"><span id="libraryStatus">正在读取...</span></div>
         <div id="libraryList" class="library-list"></div>
-      </aside>
+      </div>
 
-      <section class="watch-column">
-        <div class="player-card">
-          <div class="player-head">
-            <div class="title-block"><p class="eyebrow">NOW WATCHING</p><h2 id="mediaTitle">选择一个视频开始</h2></div>
+      <div class="sidebar-footer">
+        <button id="settingsBtn" class="sidebar-action" type="button"><span class="action-icon">⚙</span><span><strong>设置</strong><small>WebDAV 与访问密码</small></span></button>
+        <button id="logoutBtn" class="sidebar-action danger-action" type="button"><span class="action-icon">↪</span><span><strong>退出</strong><small>离开当前会话</small></span></button>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="mobile-brand mobile-only">
+          <button id="libraryToggle" class="icon-button" type="button" aria-label="打开片库">☰</button>
+          <strong>TogetherVideo</strong>
+        </div>
+        <div class="room-summary">
+          <span class="room-label">固定双人房间</span>
+          <span id="socketBadge" class="connection-chip"><i></i>连接中</span>
+          <span id="onlineBadge" class="connection-chip"><i></i>0 / 2 在线</span>
+        </div>
+        <div class="top-actions">
+          <div class="theme-switch" aria-label="主题切换">
+            <span class="theme-switch-label">主题</span>
+            <button type="button" data-theme-toggle class="theme-toggle"><span data-theme-icon>☾</span><span data-theme-label>黑暗</span></button>
+          </div>
+          <button class="icon-button desktop-settings" type="button" onclick="document.getElementById('settingsBtn').click()" title="设置">⚙</button>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="hero-card player-card">
+          <div class="hero-head">
+            <div class="now-playing">
+              <span class="kicker">NOW WATCHING</span>
+              <h1 id="mediaTitle">选择一个视频开始</h1>
+            </div>
             <span id="syncBadge" class="sync-badge">等待视频</span>
           </div>
 
           <div id="videoShell" class="video-shell">
-            <!-- app-3.1.js keeps this node only as a stable bootstrap contract.
-                 artplayer-media.js replaces the real media element with ArtPlayer's
-                 own native HTMLVideoElement before any video source is assigned. -->
             <video id="video" playsinline webkit-playsinline preload="metadata"></video>
             <div id="libmediaPlayer" class="libmedia-player hidden" aria-label="ArtPlayer 播放器"></div>
             <div id="emptyPlayer" class="empty-player">
-              <span class="play-icon">▶</span>
-              <strong>从片库选择视频</strong>
-              <span>3.2.5：ArtPlayer 界面 + 稳定 123 Range 媒体通道</span>
+              <div class="empty-symbol"><span>▶</span></div>
+              <strong>从左侧片库选择视频</strong>
+              <p>双方同步控制，缓存与 Range 各自独立。</p>
             </div>
-            <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击继续同步播放</button>
-            <!-- Legacy compatibility controls stay in the DOM because the room
-                 client still passes the same options object; ArtPlayer does not show them. -->
+            <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击开启声音并继续播放</button>
             <div id="compatControls" class="compat-controls hidden">
               <button id="compatPlayBtn" class="compat-play" type="button">▶ 播放</button>
               <input id="compatSeek" class="compat-seek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" />
@@ -78,59 +110,78 @@
             </div>
           </div>
 
-          <div class="control-bar">
-            <button id="waitBtn" class="wait-button" type="button">等等我</button>
-            <button id="syncNowBtn" class="secondary" type="button">重新同步</button>
-            <label class="rate-control">倍速
+          <div class="player-toolbar">
+            <div class="primary-controls">
+              <button id="waitBtn" class="soft-button warm" type="button"><span>✋</span> 等等我</button>
+              <button id="syncNowBtn" class="soft-button" type="button"><span>↔</span> 重新同步</button>
+            </div>
+            <label class="rate-control"><span>播放倍速</span>
               <select id="rateSelect">
                 <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
                 <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
               </select>
             </label>
           </div>
-
           <p id="playerNotice" class="notice"></p>
-        </div>
+        </section>
 
-        <div class="status-grid">
-          <div class="status-card">
-            <span class="status-dot online"></span>
-            <div><small>你</small><strong id="selfStatus">在线</strong><span id="selfBuffering" class="muted compact">播放就绪</span></div>
+        <section class="people-card">
+          <div class="people-head">
+            <div><span class="kicker">ROOM STATUS</span><h2>观看状态</h2></div>
+            <span class="independent-note">网络与缓存互不阻塞</span>
           </div>
-          <div class="status-card">
-            <span id="peerDot" class="status-dot"></span>
-            <div><small>对方</small><strong id="peerStatus">离线</strong><span id="peerBuffering" class="muted compact">等待上线</span></div>
+          <div class="people-grid">
+            <article class="person-card self-card">
+              <div class="avatar">我</div>
+              <div class="person-copy"><span>你的线路</span><strong id="selfStatus">在线</strong><small id="selfBuffering">播放就绪</small></div>
+              <span class="person-state"><i class="status-dot online"></i>本地</span>
+            </article>
+            <div class="link-visual"><span></span><b>控制同步</b><span></span></div>
+            <article class="person-card peer-card">
+              <div class="avatar peer-avatar">TA</div>
+              <div class="person-copy"><span>对方线路</span><strong id="peerStatus">离线</strong><small id="peerBuffering">等待上线</small></div>
+              <span class="person-state"><i id="peerDot" class="status-dot"></i>远端</span>
+            </article>
           </div>
-        </div>
-      </section>
-    </main>
+        </section>
+      </main>
+    </div>
   </div>
 
   <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
     <div class="settings-card">
-      <div class="panel-head"><div><p class="eyebrow">SETTINGS</p><h2>WebDAV 设置</h2></div><button id="closeSettingsBtn" class="ghost" type="button">关闭</button></div>
-      <p class="muted">123 云盘请使用“第三方挂载 / WebDAV”生成的应用密码。服务器只解析目录和跳转地址；视频 Range 数据仍由浏览器直接读取 123。</p>
-      <div class="form-grid">
-        <label class="full">WebDAV 地址<input id="webdavUrl" placeholder="https://webdav.123pan.cn/webdav" /></label>
-        <label>用户名<input id="webdavUsername" autocomplete="username" placeholder="123 云盘账号 / WebDAV 用户名" /></label>
-        <label>密码 / 应用密码<input id="webdavPassword" type="password" autocomplete="new-password" placeholder="留空则保留已保存密码" /></label>
-        <label class="full">根目录<input id="webdavRoot" value="/" placeholder="/影视/电视剧" /></label>
+      <div class="settings-head">
+        <div><span class="kicker">SETTINGS</span><h2>空间设置</h2><p>管理媒体来源和站点访问方式。</p></div>
+        <button id="closeSettingsBtn" class="icon-button" type="button" aria-label="关闭设置">×</button>
       </div>
-      <div class="settings-actions"><button id="testWebdavBtn" class="secondary" type="button">测试连接</button><button id="saveWebdavBtn" class="primary" type="button">保存并使用</button></div>
-      <hr />
-      <div class="password-row"><label>新的站点访问密码<input id="newSitePassword" type="password" minlength="6" placeholder="至少 6 个字符" /></label><button id="saveSitePasswordBtn" class="ghost" type="button">修改密码</button></div>
+
+      <section class="settings-section">
+        <div class="setting-section-title"><span class="setting-icon">☁</span><div><strong>WebDAV 媒体源</strong><small>仅用于目录与临时 CDN 地址解析，视频正文不经过服务器。</small></div></div>
+        <div class="form-grid">
+          <label class="full"><span>WebDAV 地址</span><input id="webdavUrl" placeholder="https://webdav.123pan.cn/webdav" /></label>
+          <label><span>用户名</span><input id="webdavUsername" autocomplete="username" placeholder="WebDAV 用户名" /></label>
+          <label><span>密码 / 应用密码</span><input id="webdavPassword" type="password" autocomplete="new-password" placeholder="留空则保留已保存密码" /></label>
+          <label class="full"><span>根目录</span><input id="webdavRoot" value="/" placeholder="/影视/电视剧" /></label>
+        </div>
+        <div class="settings-actions"><button id="testWebdavBtn" class="soft-button" type="button">测试连接</button><button id="saveWebdavBtn" class="primary" type="button">保存媒体源</button></div>
+      </section>
+
+      <section class="settings-section compact-section">
+        <div class="setting-section-title"><span class="setting-icon">⌁</span><div><strong>站点访问密码</strong><small>修改两个人进入 TogetherVideo 时使用的访问密码。</small></div></div>
+        <div class="password-row"><label><span>新密码</span><input id="newSitePassword" type="password" minlength="6" placeholder="至少 6 个字符" /></label><button id="saveSitePasswordBtn" class="soft-button" type="button">修改密码</button></div>
+      </section>
       <p id="settingsNotice" class="notice"></p>
     </div>
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/media-transport.js?v=3.2.5"></script>
+  <script src="/media-transport.js?v=4.0"></script>
   <script src="/vendor/artplayer/artplayer.js?v=5.4.0"></script>
-  <script src="/artplayer-media.js?v=3.2.5"></script>
-  <script src="/media-stability.js?v=3.2.5"></script>
+  <script src="/artplayer-media.js?v=4.0"></script>
+  <script src="/media-stability.js?v=4.0"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app-3.1.js?v=3.2.5-artplayer-stable"></script>
-  <script src="/playback-unlock.js?v=3.2.5"></script>
-  <script src="/media-diagnostics.js?v=3.2.5"></script>
+  <script src="/app-3.1.js?v=4.0"></script>
+  <script src="/playback-unlock.js?v=4.0"></script>
+  <script src="/media-diagnostics.js?v=4.0"></script>
 </body>
 </html>
