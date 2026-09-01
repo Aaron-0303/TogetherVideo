@@ -7,6 +7,7 @@
   <meta name="color-scheme" content="light dark" />
   <title>TogetherVideo 4.1</title>
   <link rel="stylesheet" href="/styles.css?v=4.1" />
+  <link rel="stylesheet" href="/sidebar-readable.css?v=4.1" />
   <script src="/ui-shell.js?v=4.1"></script>
 </head>
 <body>
@@ -163,7 +164,7 @@
   <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
     <div class="settings-card">
       <div class="settings-head">
-        <div><span class="eyebrow">SETTINGS</span><h2>空间设置</h2><p>媒体来源与站点访问方式。</p></div>
+        <div><span class="eyebrow">SETTINGS</span><h2>空间设置</h2><p>管理媒体源、访问密码与房间数据。</p></div>
         <button id="closeSettingsBtn" class="round-button" type="button" aria-label="关闭设置">×</button>
       </div>
       <section class="settings-section">
@@ -179,6 +180,10 @@
       <section class="settings-section">
         <div class="setting-title"><span>⌁</span><div><strong>站点访问密码</strong><small>修改进入 TogetherVideo 时使用的访问密码。</small></div></div>
         <div class="password-row"><label><span>新密码</span><input id="newSitePassword" type="password" minlength="6" placeholder="至少 6 个字符" /></label><button id="saveSitePasswordBtn" class="outline-button" type="button">修改密码</button></div>
+      </section>
+      <section class="settings-section">
+        <div class="setting-title"><span>✦</span><div><strong>聊天记录</strong><small>聊天只保存在服务器内存中。清空后双方当前页面和后加入者的历史记录都会被删除。</small></div></div>
+        <div class="settings-actions"><button id="clearChatBtn" class="danger-button" type="button">清空聊天记录</button></div>
       </section>
       <p id="settingsNotice" class="notice"></p>
     </div>
