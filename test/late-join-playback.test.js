@@ -8,6 +8,7 @@ const routes = fs.readFileSync(path.join(root, 'src', 'http-routes.js'), 'utf8')
 const worker = fs.readFileSync(path.join(root, 'public', 'sw.js'), 'utf8');
 const unlock = fs.readFileSync(path.join(root, 'public', 'playback-unlock.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public', 'app-3.1.js'), 'utf8');
+const coordinator = fs.readFileSync(path.join(root, 'src', 'room-coordinator.js'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 
 test('browser media bootstrap resolves a fresh provider URL through the 307 worker resolver', () => {
@@ -18,7 +19,7 @@ test('browser media bootstrap resolves a fresh provider URL through the 307 work
   assert.match(worker, /searchParams\.set\('_swresolve', '1'\)/);
 });
 
-test('late join autoplay rejection falls back to visible muted playback', () => {
+test('autoplay rejection falls back to visible muted playback', () => {
   assert.match(unlock, /NotAllowedError/);
   assert.match(unlock, /video\.muted = true/);
   assert.match(unlock, /await originalPlay/);
@@ -39,8 +40,8 @@ test('unlock shim loads after the room app creates TogetherMediaPlayer', () => {
   assert.match(app, /window\.TogetherMediaPlayer = player/);
 });
 
-test('late join UI waits for a shared ready barrier instead of chasing the live clock', () => {
-  assert.match(app, /barrier\.reason === 'join'/);
-  assert.match(app, /双方缓存到同一位置后会同时继续播放/);
-  assert.doesNotMatch(app, /playbackRate\s*[+\-]=/);
+test('late join never creates a pause-and-cache barrier', () => {
+  assert.match(coordinator, /handleJoin\(\)[\s\S]*?return null/);
+  assert.doesNotMatch(coordinator, /reason: 'join'/);
+  assert.doesNotMatch(coordinator, /barrier-join/);
 });
