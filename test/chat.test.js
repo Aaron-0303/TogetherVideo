@@ -26,7 +26,7 @@ class FakeSocket {
   disconnect() {}
 }
 
-test('room chat broadcasts messages and gives recent history to the second viewer', () => {
+function createChatRoom() {
   const io = new FakeIo();
   const room = new WatchRoom();
   const coordinator = new RoomCoordinator({ io, room, maxParticipants: 2 });
@@ -36,6 +36,11 @@ test('room chat broadcasts messages and gives recent history to the second viewe
     coordinator,
     mediaService: { isSupportedPath: () => true },
   });
+  return { io, room, coordinator };
+}
+
+test('room chat broadcasts messages and gives recent history to the second viewer', () => {
+  const { io, coordinator } = createChatRoom();
 
   const a = new FakeSocket('socket-a', 'a', '旭旭');
   io.connect(a);
@@ -53,6 +58,31 @@ test('room chat broadcasts messages and gives recent history to the second viewe
   assert.ok(history);
   assert.equal(history.payload.length, 1);
   assert.equal(history.payload[0].text, '一起 看 吧');
+  coordinator.stop();
+});
+
+test('clearing chat removes server history and notifies both viewers', () => {
+  const { io, coordinator } = createChatRoom();
+
+  const a = new FakeSocket('socket-a', 'a', '旭旭');
+  const b = new FakeSocket('socket-b', 'b', '小杨');
+  io.connect(a);
+  io.connect(b);
+  a.trigger('chat:send', { text: '这一条稍后删除' });
+
+  io.events.length = 0;
+  b.trigger('chat:clear');
+
+  const cleared = io.events.find((item) => item.event === 'chat:cleared');
+  assert.ok(cleared);
+  assert.equal(cleared.payload.clearedBy, '小杨');
+
+  const c = new FakeSocket('socket-c', 'c', '测试');
+  coordinator.unregisterParticipant('a', 'socket-a');
+  io.connect(c);
+  const history = c.sent.find((item) => item.event === 'chat:history');
+  assert.ok(history);
+  assert.deepEqual(history.payload, []);
   coordinator.stop();
 });
 
