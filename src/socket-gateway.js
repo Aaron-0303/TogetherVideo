@@ -2,8 +2,16 @@ const crypto = require('crypto');
 const { cleanMediaPath } = require('./watch-room');
 const { cleanName } = require('./identity');
 
+const CHAT_HISTORY_LIMIT = 80;
+const CHAT_MESSAGE_LIMIT = 300;
+
+function cleanChatMessage(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, CHAT_MESSAGE_LIMIT);
+}
+
 function registerSocketGateway(options = {}) {
   const { io, room, coordinator, mediaService } = options;
+  const chatHistory = [];
 
   io.use((socket, next) => (
     socket.request.session?.authenticated ? next() : next(new Error('unauthorized'))
@@ -22,12 +30,9 @@ function registerSocketGateway(options = {}) {
     socket.data.participantId = participantId;
     socket.data.nickname = nickname;
 
-    // If this is the second viewer entering an already-running movie, the join
-    // itself opens a barrier and broadcasts it to both clients. Do not then send
-    // the same barrier to the joining socket a second time: on slow Safari that
-    // duplicate packet could restart the same in-flight seek.
     const joinBarrier = coordinator.handleJoin(participantId, nickname);
     socket.emit('room:snapshot', room.snapshot());
+    socket.emit('chat:history', chatHistory.slice());
     if (!joinBarrier) coordinator.sendBarrier(socket);
     coordinator.broadcastPresence();
 
@@ -79,10 +84,25 @@ function registerSocketGateway(options = {}) {
       coordinator.requestWait(nickname);
     });
 
+    socket.on('chat:send', (payload = {}) => {
+      const text = cleanChatMessage(payload.text);
+      if (!text) return;
+      const message = {
+        id: crypto.randomUUID(),
+        participantId,
+        nickname,
+        text,
+        sentAt: Date.now(),
+      };
+      chatHistory.push(message);
+      if (chatHistory.length > CHAT_HISTORY_LIMIT) chatHistory.splice(0, chatHistory.length - CHAT_HISTORY_LIMIT);
+      io.emit('chat:message', message);
+    });
+
     socket.on('disconnect', () => {
       coordinator.unregisterParticipant(participantId, socket.id);
     });
   });
 }
 
-module.exports = { registerSocketGateway };
+module.exports = { registerSocketGateway, cleanChatMessage, CHAT_HISTORY_LIMIT, CHAT_MESSAGE_LIMIT };
