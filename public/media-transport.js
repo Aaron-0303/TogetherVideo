@@ -15,8 +15,6 @@
           if (url.pathname !== '/api/media') return;
         } catch { return; }
 
-        // A failed request may have escaped before a newly-installed worker took
-        // control. Retry only the failed media element; never disturb live playback.
         try { player?.removeAttribute?.('src'); } catch { video.removeAttribute('src'); }
         try { player?.load?.(); } catch { try { video.load(); } catch {} }
         if (player) {
@@ -52,7 +50,7 @@
 
     readyPromise = (async () => {
       try {
-        const registration = await navigator.serviceWorker.register('/sw.js?v=4.0', { scope: '/' });
+        const registration = await navigator.serviceWorker.register('/sw.js?v=4.1', { scope: '/' });
         registration.update().catch(() => {});
         await navigator.serviceWorker.ready;
         const controlled = await waitForController();
@@ -74,7 +72,5 @@
     mode: () => mode,
   };
 
-  // Start registration before the room app constructs ArtPlayer. media-stability
-  // will still await this promise before assigning the first real media source.
   ensureReady();
 })();
