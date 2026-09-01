@@ -99,6 +99,14 @@ function registerSocketGateway(options = {}) {
       io.emit('chat:message', message);
     });
 
+    socket.on('chat:clear', () => {
+      chatHistory.length = 0;
+      io.emit('chat:cleared', {
+        clearedBy: nickname,
+        clearedAt: Date.now(),
+      });
+    });
+
     socket.on('disconnect', () => {
       coordinator.unregisterParticipant(participantId, socket.id);
     });
