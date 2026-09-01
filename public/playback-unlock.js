@@ -1,6 +1,6 @@
 (() => {
   const player = window.TogetherMediaPlayer;
-  const video = document.getElementById('video');
+  const video = player?.video || document.getElementById('video');
   const overlay = document.getElementById('resumeOverlay');
   if (!player || !video || !overlay || player.__togetherUnlockPatched) return;
 
