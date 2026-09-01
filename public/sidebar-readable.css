@@ -65,6 +65,9 @@
 .library-item strong{font-size:13px}
 .library-item small{font-size:11px}
 
+.danger-button{min-height:38px;padding:0 14px;border:1px solid color-mix(in srgb,var(--danger) 48%,var(--line));border-radius:7px;background:color-mix(in srgb,var(--danger) 8%,var(--surface));color:var(--danger);font-size:13px;font-weight:750}
+.danger-button:hover{background:color-mix(in srgb,var(--danger) 14%,var(--surface));border-color:var(--danger)}
+
 @media (max-width:820px){
   .sidebar-tab{font-size:14px}
   .sidebar-tab span{font-size:11px}
