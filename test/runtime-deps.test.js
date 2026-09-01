@@ -20,7 +20,7 @@ test('all server runtime dependencies are declared and resolvable', () => {
   }
 });
 
-test('4.0 ships the ArtPlayer browser distribution locally', () => {
+test('4.1 ships the ArtPlayer browser distribution locally', () => {
   const pkg = require('../package.json');
   assert.equal(pkg.dependencies?.artplayer, '5.4.0');
   const distDir = path.join(process.cwd(), 'node_modules', 'artplayer', 'dist');
