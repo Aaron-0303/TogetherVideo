@@ -76,6 +76,13 @@
     root.scrollTop = root.scrollHeight;
   }
 
+  function showSettingsNotice(text) {
+    const notice = $('settingsNotice');
+    if (!notice) return;
+    notice.textContent = text;
+    notice.classList.remove('error');
+  }
+
   async function refreshIdentity() {
     try {
       const response = await fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' });
@@ -102,6 +109,14 @@
       messages.push(message);
       if (messages.length > 80) messages = messages.slice(-80);
       renderChat();
+    });
+
+    socket.on('chat:cleared', (payload = {}) => {
+      messages = [];
+      renderChat();
+      showSettingsNotice(payload.clearedBy
+        ? `聊天记录已由 ${payload.clearedBy} 清空。`
+        : '聊天记录已清空。');
     });
   }
 
@@ -136,6 +151,15 @@
       currentSocket.emit('chat:send', { text });
       input.value = '';
       input.focus();
+    });
+
+    $('clearChatBtn')?.addEventListener('click', () => {
+      if (!currentSocket?.connected) {
+        showSettingsNotice('当前未连接房间，无法清空聊天记录。');
+        return;
+      }
+      if (!window.confirm('确定清空当前房间的全部聊天记录吗？此操作会同时清空双方看到的历史记录。')) return;
+      currentSocket.emit('chat:clear');
     });
 
     setSidebarTab('room');
