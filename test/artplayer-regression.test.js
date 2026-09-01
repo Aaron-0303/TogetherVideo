@@ -16,25 +16,36 @@ const routesSource = fs.readFileSync(path.join(root, 'src', 'http-routes.js'), '
 const serverSource = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 const pkg = require('../package.json');
 
-test('4.0 uses ArtPlayer UI on top of the stable media transport', () => {
-  assert.equal(pkg.version, '4.0.0');
-  const transportAt = indexSource.indexOf('/media-transport.js?v=4.0');
+test('4.1 uses ArtPlayer UI on top of the stable media transport', () => {
+  assert.equal(pkg.version, '4.1.0');
+  const transportAt = indexSource.indexOf('/media-transport.js?v=4.1');
   const artRuntimeAt = indexSource.indexOf('/vendor/artplayer/artplayer.js?v=5.4.0');
-  const adapterAt = indexSource.indexOf('/artplayer-media.js?v=4.0');
-  const stabilityAt = indexSource.indexOf('/media-stability.js?v=4.0');
-  const appAt = indexSource.indexOf('/app-3.1.js?v=4.0');
+  const adapterAt = indexSource.indexOf('/artplayer-media.js?v=4.1');
+  const stabilityAt = indexSource.indexOf('/media-stability.js?v=4.1');
+  const appAt = indexSource.indexOf('/app-3.1.js?v=4.1');
   assert.ok(transportAt >= 0 && artRuntimeAt > transportAt && adapterAt > artRuntimeAt);
   assert.ok(stabilityAt > adapterAt && appAt > stabilityAt);
   assert.doesNotMatch(indexSource, /\/hybrid-media\.js/);
 });
 
-test('4.0 shell provides persistent light and dark themes', () => {
+test('4.1 shell keeps persistent light and dark themes', () => {
   assert.match(indexSource, /data-theme-toggle/);
-  assert.match(indexSource, /ui-shell\.js\?v=4\.0/);
+  assert.match(indexSource, /ui-shell\.js\?v=4\.1/);
   assert.match(uiSource, /togethervideo-theme/);
   assert.match(uiSource, /prefers-color-scheme: dark/);
-  assert.match(styleSource, /html\[data-theme="dark"\]/);
+  assert.match(styleSource, /html\[data-theme="light"\]/);
   assert.match(styleSource, /--surface:/);
+});
+
+test('4.1 layout is player-first with a room sidebar and drawer library', () => {
+  assert.match(indexSource, /class="watch-layout"/);
+  assert.match(indexSource, /class="stage-column"/);
+  assert.match(indexSource, /class="room-sidebar"/);
+  assert.match(indexSource, /class="library-drawer"/);
+  assert.match(indexSource, /控制同步，媒体线路独立/);
+  assert.match(styleSource, /grid-template-columns:minmax\(0,1fr\) 318px/);
+  assert.match(styleSource, /\.library-drawer\.open/);
+  assert.doesNotMatch(indexSource, /class="people-card"/);
 });
 
 test('ArtPlayer adapter keeps the room client contract while using native video', () => {
@@ -48,7 +59,7 @@ test('ArtPlayer adapter keeps the room client contract while using native video'
 });
 
 test('media load waits for the Service Worker controller before ArtPlayer gets a source', () => {
-  assert.match(transportSource, /navigator\.serviceWorker\.register\('\/sw\.js\?v=4\.0'/);
+  assert.match(transportSource, /navigator\.serviceWorker\.register\('\/sw\.js\?v=4\.1'/);
   assert.match(stabilitySource, /window\.MediaTransport\?\.ready\?\.\(\)/);
   assert.match(stabilitySource, /originalLoad\.call\(this\)/);
   assert.match(adapterSource, /this\.video\.src = resolved/);
@@ -62,6 +73,7 @@ test('provider reads stay bounded, discard stale If-Range, and require real part
   assert.match(workerSource, /function validPartialResponse\(response\)/);
   assert.match(workerSource, /response\.status !== 206/);
   assert.match(workerSource, /resolveProviderUrl\(mediaPath, true\)/);
+  assert.match(workerSource, /X-TogetherVideo-Media-Version', '4\.1'/);
 });
 
 test('browser media bytes remain provider-direct through a 307 resolver', () => {
