@@ -1,187 +1,205 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#f3f5f8" />
+  <meta name="theme-color" content="#0b0f17" />
   <meta name="color-scheme" content="light dark" />
-  <title>TogetherVideo 4.0</title>
-  <link rel="stylesheet" href="/styles.css?v=4.0" />
-  <script src="/ui-shell.js?v=4.0"></script>
+  <title>TogetherVideo 4.1</title>
+  <link rel="stylesheet" href="/styles.css?v=4.1" />
+  <script src="/ui-shell.js?v=4.1"></script>
 </head>
 <body>
-  <div class="ambient ambient-a"></div>
-  <div class="ambient ambient-b"></div>
-
   <div id="loginLayer" class="login-layer hidden">
     <button class="theme-fab" type="button" data-theme-toggle aria-label="切换主题">
-      <span data-theme-icon>☾</span><span data-theme-label>黑暗</span>
+      <span data-theme-icon>☀</span><span data-theme-label>明亮</span>
     </button>
     <form id="loginForm" class="login-card">
       <div class="login-brand">
-        <div class="brand-mark">TV</div>
-        <div><strong>TogetherVideo</strong><span>4.0</span></div>
+        <span class="brand-symbol">▶</span>
+        <div><strong>TogetherVideo</strong><span>4.1</span></div>
       </div>
       <div class="login-copy">
-        <span class="kicker">PRIVATE WATCH ROOM</span>
-        <h1>两个人，一条时间线。<br />各自一条媒体线路。</h1>
-        <p>同步播放、暂停与进度，缓存和网络互不拖累。登录后直接进入固定的双人观影空间。</p>
+        <span class="eyebrow">PRIVATE WATCH ROOM</span>
+        <h1>一起看，更同步，<br />也更沉浸。</h1>
+        <p>播放控制共享一条时间线，视频缓存与网络连接各自独立。</p>
       </div>
       <div class="login-fields">
         <label><span>昵称</span><input id="nicknameInput" maxlength="20" autocomplete="nickname" placeholder="例如：旭旭" required /></label>
         <label><span>访问密码</span><input id="passwordInput" type="password" autocomplete="current-password" placeholder="输入站点访问密码" required /></label>
       </div>
-      <button class="primary wide login-submit" type="submit">进入观影空间 <span>→</span></button>
+      <button class="primary login-submit" type="submit"><span>进入观影空间</span><b>→</b></button>
       <p id="loginError" class="error"></p>
-      <div class="login-foot"><span>ArtPlayer 5.4</span><span>Independent media lanes</span><span>123 CDN direct</span></div>
+      <div class="login-foot"><span>双人固定房间</span><span>独立媒体线路</span><span>123 CDN 直连</span></div>
     </form>
   </div>
 
   <div id="app" class="app hidden">
-    <aside id="libraryPanel" class="sidebar library-panel">
-      <div class="sidebar-brand">
-        <div class="brand-mark small">TV</div>
-        <div class="brand-copy"><strong>TogetherVideo</strong><span>Private room · 4.0</span></div>
-        <button id="closeLibraryBtn" class="icon-button mobile-only" type="button" aria-label="关闭片库">×</button>
+    <header class="topbar">
+      <div class="brand-zone">
+        <div class="brand-lockup"><span class="brand-symbol mini">▶</span><strong>TogetherVideo</strong><small>4.1</small></div>
+        <span class="top-divider"></span>
+        <button id="libraryToggle" class="top-room-button" type="button"><span>固定双人房间</span><b>⌄</b></button>
       </div>
 
-      <div class="sidebar-section library-section">
-        <div class="section-title-row">
-          <div><span class="kicker">LIBRARY</span><h2>片库</h2></div>
-          <button id="refreshLibraryBtn" class="icon-button" type="button" title="刷新片库">↻</button>
-        </div>
-        <div id="breadcrumbs" class="breadcrumbs"></div>
-        <div class="library-meta"><span id="libraryStatus">正在读取...</span></div>
-        <div id="libraryList" class="library-list"></div>
+      <div class="connection-zone">
+        <span id="socketBadge" class="status-chip"><i></i>连接中</span>
+        <span id="onlineBadge" class="status-chip people-chip">0 / 2 在线</span>
       </div>
 
-      <div class="sidebar-footer">
-        <button id="settingsBtn" class="sidebar-action" type="button"><span class="action-icon">⚙</span><span><strong>设置</strong><small>WebDAV 与访问密码</small></span></button>
-        <button id="logoutBtn" class="sidebar-action danger-action" type="button"><span class="action-icon">↪</span><span><strong>退出</strong><small>离开当前会话</small></span></button>
+      <div class="account-zone">
+        <button class="round-button" type="button" data-theme-toggle aria-label="切换主题" title="切换主题"><span data-theme-icon>☀</span></button>
+        <button id="settingsBtn" class="round-button" type="button" title="设置">⚙</button>
+        <button id="logoutBtn" class="avatar-button" type="button" title="退出登录"><span>TV</span></button>
       </div>
-    </aside>
+    </header>
 
-    <div class="workspace">
-      <header class="topbar">
-        <div class="mobile-brand mobile-only">
-          <button id="libraryToggle" class="icon-button" type="button" aria-label="打开片库">☰</button>
-          <strong>TogetherVideo</strong>
-        </div>
-        <div class="room-summary">
-          <span class="room-label">固定双人房间</span>
-          <span id="socketBadge" class="connection-chip"><i></i>连接中</span>
-          <span id="onlineBadge" class="connection-chip"><i></i>0 / 2 在线</span>
-        </div>
-        <div class="top-actions">
-          <div class="theme-switch" aria-label="主题切换">
-            <span class="theme-switch-label">主题</span>
-            <button type="button" data-theme-toggle class="theme-toggle"><span data-theme-icon>☾</span><span data-theme-label>黑暗</span></button>
+    <main class="watch-layout">
+      <section class="stage-column">
+        <div class="stage-meta">
+          <div class="stage-title">
+            <span class="eyebrow">NOW WATCHING</span>
+            <h1 id="mediaTitle">选择一个视频开始</h1>
           </div>
-          <button class="icon-button desktop-settings" type="button" onclick="document.getElementById('settingsBtn').click()" title="设置">⚙</button>
-        </div>
-      </header>
-
-      <main class="content">
-        <section class="hero-card player-card">
-          <div class="hero-head">
-            <div class="now-playing">
-              <span class="kicker">NOW WATCHING</span>
-              <h1 id="mediaTitle">选择一个视频开始</h1>
-            </div>
-            <span id="syncBadge" class="sync-badge">等待视频</span>
+          <div class="stage-meta-right">
+            <span class="media-pill">ArtPlayer</span>
+            <span class="media-pill subtle">独立媒体线路</span>
           </div>
+        </div>
 
+        <div class="player-frame">
+          <button class="library-handle" type="button" onclick="document.getElementById('libraryToggle').click()" aria-label="打开媒体库">
+            <span>▤</span><b>媒体库</b><small>点击展开</small>
+          </button>
           <div id="videoShell" class="video-shell">
             <video id="video" playsinline webkit-playsinline preload="metadata"></video>
             <div id="libmediaPlayer" class="libmedia-player hidden" aria-label="ArtPlayer 播放器"></div>
             <div id="emptyPlayer" class="empty-player">
-              <div class="empty-symbol"><span>▶</span></div>
-              <strong>从左侧片库选择视频</strong>
-              <p>双方同步控制，缓存与 Range 各自独立。</p>
+              <span class="empty-play">▶</span>
+              <strong>从媒体库选择视频</strong>
+              <small>一条时间线，各自独立加载</small>
             </div>
             <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击开启声音并继续播放</button>
             <div id="compatControls" class="compat-controls hidden">
-              <button id="compatPlayBtn" class="compat-play" type="button">▶ 播放</button>
-              <input id="compatSeek" class="compat-seek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" />
-              <span id="compatTime" class="compat-time">00:00 / 00:00</span>
-              <label class="compat-volume">音量<input id="compatVolume" type="range" min="0" max="1" step="0.05" value="1" /></label>
-              <button id="compatFullscreenBtn" class="compat-fullscreen" type="button">全屏</button>
-              <span class="compat-engine">兼容播放</span>
+              <button id="compatPlayBtn" type="button">▶</button>
+              <input id="compatSeek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" />
+              <span id="compatTime">00:00 / 00:00</span>
+              <label>音量<input id="compatVolume" type="range" min="0" max="1" step="0.05" value="1" /></label>
+              <button id="compatFullscreenBtn" type="button">全屏</button>
             </div>
           </div>
+        </div>
 
-          <div class="player-toolbar">
-            <div class="primary-controls">
-              <button id="waitBtn" class="soft-button warm" type="button"><span>✋</span> 等等我</button>
-              <button id="syncNowBtn" class="soft-button" type="button"><span>↔</span> 重新同步</button>
-            </div>
-            <label class="rate-control"><span>播放倍速</span>
-              <select id="rateSelect">
-                <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
-                <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
-              </select>
-            </label>
-          </div>
+        <div class="stage-footer">
+          <div class="stage-note"><i></i><span>控制同步，媒体缓存互不等待</span></div>
           <p id="playerNotice" class="notice"></p>
+        </div>
+      </section>
+
+      <aside class="room-sidebar">
+        <section class="room-section members-section">
+          <div class="section-heading"><div><span class="eyebrow">ROOM</span><h2>房间成员</h2></div><span class="tiny-badge">2 MAX</span></div>
+          <div class="member-stack">
+            <article class="member-card">
+              <div class="member-avatar self">你</div>
+              <div class="member-copy"><strong>你 <em>本机</em></strong><span id="selfStatus">在线</span></div>
+              <i class="status-dot online"></i>
+            </article>
+            <article class="member-card">
+              <div class="member-avatar peer">TA</div>
+              <div class="member-copy"><strong>TA</strong><span id="peerStatus">离线</span></div>
+              <i id="peerDot" class="status-dot"></i>
+            </article>
+          </div>
         </section>
 
-        <section class="people-card">
-          <div class="people-head">
-            <div><span class="kicker">ROOM STATUS</span><h2>观看状态</h2></div>
-            <span class="independent-note">网络与缓存互不阻塞</span>
-          </div>
-          <div class="people-grid">
-            <article class="person-card self-card">
-              <div class="avatar">我</div>
-              <div class="person-copy"><span>你的线路</span><strong id="selfStatus">在线</strong><small id="selfBuffering">播放就绪</small></div>
-              <span class="person-state"><i class="status-dot online"></i>本地</span>
-            </article>
-            <div class="link-visual"><span></span><b>控制同步</b><span></span></div>
-            <article class="person-card peer-card">
-              <div class="avatar peer-avatar">TA</div>
-              <div class="person-copy"><span>对方线路</span><strong id="peerStatus">离线</strong><small id="peerBuffering">等待上线</small></div>
-              <span class="person-state"><i id="peerDot" class="status-dot"></i>远端</span>
-            </article>
+        <section class="room-section sync-section">
+          <div class="section-heading compact-heading"><h3>同步状态</h3></div>
+          <div class="sync-card">
+            <div class="sync-icon">✓</div>
+            <div><strong id="syncBadge">等待视频</strong><span>控制同步，媒体线路独立</span></div>
           </div>
         </section>
-      </main>
-    </div>
+
+        <section class="room-section buffer-section">
+          <div class="section-heading compact-heading"><h3>缓冲状态</h3></div>
+          <div class="buffer-list">
+            <div><span>你</span><b class="signal"><i></i><i></i><i></i><i></i></b><small id="selfBuffering">等待媒体</small></div>
+            <div><span>TA</span><b class="signal"><i></i><i></i><i></i><i></i></b><small id="peerBuffering">等待上线</small></div>
+          </div>
+          <div class="room-actions">
+            <button id="waitBtn" class="primary" type="button">等等我</button>
+            <button id="syncNowBtn" class="outline-button" type="button">重新同步</button>
+          </div>
+        </section>
+
+        <section class="room-section speed-section">
+          <div class="section-heading compact-heading"><h3>播放速度</h3><span>双方同步</span></div>
+          <label class="speed-select-wrap">
+            <select id="rateSelect" aria-label="播放速度">
+              <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1.0×</option>
+              <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2.0×</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="room-section activity-section">
+          <div class="section-heading compact-heading"><h3>房间动态</h3><span>实时</span></div>
+          <div class="activity-list">
+            <div><i></i><span>播放 / 暂停 / 拖动会同步给双方</span></div>
+            <div><i></i><span>任意一方缓冲只影响自己的播放器</span></div>
+            <div><i></i><span>需要时可手动执行一次重新同步</span></div>
+          </div>
+          <div class="activity-input"><span>一条时间线，各自独立加载</span><b>→</b></div>
+        </section>
+      </aside>
+    </main>
   </div>
+
+  <div id="libraryScrim" class="drawer-scrim" onclick="document.getElementById('libraryPanel').classList.remove('open')"></div>
+  <aside id="libraryPanel" class="library-drawer">
+    <div class="drawer-head">
+      <div><span class="eyebrow">WEBDAV LIBRARY</span><h2>媒体库</h2></div>
+      <button id="closeLibraryBtn" class="round-button" type="button" aria-label="关闭片库">×</button>
+    </div>
+    <div id="breadcrumbs" class="breadcrumbs"></div>
+    <div class="library-toolbar"><span id="libraryStatus">正在读取...</span><button id="refreshLibraryBtn" type="button">↻ 刷新</button></div>
+    <div id="libraryList" class="library-list"></div>
+    <div class="drawer-foot"><span>视频数据直接由 123 CDN → 浏览器</span></div>
+  </aside>
 
   <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
     <div class="settings-card">
       <div class="settings-head">
-        <div><span class="kicker">SETTINGS</span><h2>空间设置</h2><p>管理媒体来源和站点访问方式。</p></div>
-        <button id="closeSettingsBtn" class="icon-button" type="button" aria-label="关闭设置">×</button>
+        <div><span class="eyebrow">SETTINGS</span><h2>空间设置</h2><p>媒体来源与站点访问方式。</p></div>
+        <button id="closeSettingsBtn" class="round-button" type="button" aria-label="关闭设置">×</button>
       </div>
-
       <section class="settings-section">
-        <div class="setting-section-title"><span class="setting-icon">☁</span><div><strong>WebDAV 媒体源</strong><small>仅用于目录与临时 CDN 地址解析，视频正文不经过服务器。</small></div></div>
+        <div class="setting-title"><span>☁</span><div><strong>WebDAV 媒体源</strong><small>只解析目录和临时 CDN 地址，视频正文不经过服务器。</small></div></div>
         <div class="form-grid">
           <label class="full"><span>WebDAV 地址</span><input id="webdavUrl" placeholder="https://webdav.123pan.cn/webdav" /></label>
           <label><span>用户名</span><input id="webdavUsername" autocomplete="username" placeholder="WebDAV 用户名" /></label>
           <label><span>密码 / 应用密码</span><input id="webdavPassword" type="password" autocomplete="new-password" placeholder="留空则保留已保存密码" /></label>
           <label class="full"><span>根目录</span><input id="webdavRoot" value="/" placeholder="/影视/电视剧" /></label>
         </div>
-        <div class="settings-actions"><button id="testWebdavBtn" class="soft-button" type="button">测试连接</button><button id="saveWebdavBtn" class="primary" type="button">保存媒体源</button></div>
+        <div class="settings-actions"><button id="testWebdavBtn" class="outline-button" type="button">测试连接</button><button id="saveWebdavBtn" class="primary" type="button">保存媒体源</button></div>
       </section>
-
-      <section class="settings-section compact-section">
-        <div class="setting-section-title"><span class="setting-icon">⌁</span><div><strong>站点访问密码</strong><small>修改两个人进入 TogetherVideo 时使用的访问密码。</small></div></div>
-        <div class="password-row"><label><span>新密码</span><input id="newSitePassword" type="password" minlength="6" placeholder="至少 6 个字符" /></label><button id="saveSitePasswordBtn" class="soft-button" type="button">修改密码</button></div>
+      <section class="settings-section">
+        <div class="setting-title"><span>⌁</span><div><strong>站点访问密码</strong><small>修改进入 TogetherVideo 时使用的访问密码。</small></div></div>
+        <div class="password-row"><label><span>新密码</span><input id="newSitePassword" type="password" minlength="6" placeholder="至少 6 个字符" /></label><button id="saveSitePasswordBtn" class="outline-button" type="button">修改密码</button></div>
       </section>
       <p id="settingsNotice" class="notice"></p>
     </div>
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/media-transport.js?v=4.0"></script>
+  <script src="/media-transport.js?v=4.1"></script>
   <script src="/vendor/artplayer/artplayer.js?v=5.4.0"></script>
-  <script src="/artplayer-media.js?v=4.0"></script>
-  <script src="/media-stability.js?v=4.0"></script>
+  <script src="/artplayer-media.js?v=4.1"></script>
+  <script src="/media-stability.js?v=4.1"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app-3.1.js?v=4.0"></script>
-  <script src="/playback-unlock.js?v=4.0"></script>
-  <script src="/media-diagnostics.js?v=4.0"></script>
+  <script src="/app-3.1.js?v=4.1"></script>
+  <script src="/playback-unlock.js?v=4.1"></script>
+  <script src="/media-diagnostics.js?v=4.1"></script>
 </body>
 </html>
