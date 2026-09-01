@@ -22,7 +22,7 @@
       <div class="login-copy">
         <span class="eyebrow">PRIVATE WATCH ROOM</span>
         <h1>一起看，更同步，<br />也更沉浸。</h1>
-        <p>播放控制共享一条时间线，视频缓存与网络连接各自独立。</p>
+        <p>两个人共享播放控制和时间线，各自独立读取视频数据。</p>
       </div>
       <div class="login-fields">
         <label><span>昵称</span><input id="nicknameInput" maxlength="20" autocomplete="nickname" placeholder="例如：旭旭" required /></label>
@@ -30,16 +30,16 @@
       </div>
       <button class="primary login-submit" type="submit"><span>进入观影空间</span><b>→</b></button>
       <p id="loginError" class="error"></p>
-      <div class="login-foot"><span>双人固定房间</span><span>独立媒体线路</span><span>123 CDN 直连</span></div>
     </form>
   </div>
 
   <div id="app" class="app hidden">
     <header class="topbar">
-      <div class="brand-zone">
+      <div class="topbar-left">
         <div class="brand-lockup"><span class="brand-symbol mini">▶</span><strong>TogetherVideo</strong><small>4.1</small></div>
         <span class="top-divider"></span>
-        <button id="libraryToggle" class="top-room-button" type="button"><span>固定双人房间</span><b>⌄</b></button>
+        <span class="room-name">固定双人房间</span>
+        <button id="libraryToggle" class="library-button" type="button"><span>▤</span> 媒体库</button>
       </div>
 
       <div class="connection-zone">
@@ -56,102 +56,97 @@
 
     <main class="watch-layout">
       <section class="stage-column">
-        <div class="stage-meta">
-          <div class="stage-title">
-            <span class="eyebrow">NOW WATCHING</span>
+        <div class="video-card">
+          <div class="video-titlebar">
             <h1 id="mediaTitle">选择一个视频开始</h1>
+            <span class="titlebar-room">双人观影</span>
           </div>
-          <div class="stage-meta-right">
-            <span class="media-pill">ArtPlayer</span>
-            <span class="media-pill subtle">独立媒体线路</span>
-          </div>
-        </div>
 
-        <div class="player-frame">
-          <button class="library-handle" type="button" onclick="document.getElementById('libraryToggle').click()" aria-label="打开媒体库">
-            <span>▤</span><b>媒体库</b><small>点击展开</small>
-          </button>
-          <div id="videoShell" class="video-shell">
-            <video id="video" playsinline webkit-playsinline preload="metadata"></video>
-            <div id="libmediaPlayer" class="libmedia-player hidden" aria-label="ArtPlayer 播放器"></div>
-            <div id="emptyPlayer" class="empty-player">
-              <span class="empty-play">▶</span>
-              <strong>从媒体库选择视频</strong>
-              <small>一条时间线，各自独立加载</small>
-            </div>
-            <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击开启声音并继续播放</button>
-            <div id="compatControls" class="compat-controls hidden">
-              <button id="compatPlayBtn" type="button">▶</button>
-              <input id="compatSeek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" />
-              <span id="compatTime">00:00 / 00:00</span>
-              <label>音量<input id="compatVolume" type="range" min="0" max="1" step="0.05" value="1" /></label>
-              <button id="compatFullscreenBtn" type="button">全屏</button>
+          <div class="player-frame">
+            <div id="videoShell" class="video-shell">
+              <video id="video" playsinline webkit-playsinline preload="metadata"></video>
+              <div id="libmediaPlayer" class="libmedia-player hidden" aria-label="ArtPlayer 播放器"></div>
+              <div id="emptyPlayer" class="empty-player">
+                <span class="empty-play">▶</span>
+                <strong>从媒体库选择视频</strong>
+              </div>
+              <button id="resumeOverlay" class="resume-overlay hidden" type="button">点击开启声音并继续播放</button>
+              <div id="compatControls" class="compat-controls hidden">
+                <button id="compatPlayBtn" type="button">▶</button>
+                <input id="compatSeek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" />
+                <span id="compatTime">00:00 / 00:00</span>
+                <label>音量<input id="compatVolume" type="range" min="0" max="1" step="0.05" value="1" /></label>
+                <button id="compatFullscreenBtn" type="button">全屏</button>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="stage-footer">
-          <div class="stage-note"><i></i><span>控制同步，媒体缓存互不等待</span></div>
-          <p id="playerNotice" class="notice"></p>
+          <div class="video-bottom-bar">
+            <p id="playerNotice" class="notice"></p>
+          </div>
         </div>
       </section>
 
       <aside class="room-sidebar">
-        <section class="room-section members-section">
-          <div class="section-heading"><div><span class="eyebrow">ROOM</span><h2>房间成员</h2></div><span class="tiny-badge">2 MAX</span></div>
-          <div class="member-stack">
-            <article class="member-card">
-              <div class="member-avatar self">你</div>
-              <div class="member-copy"><strong>你 <em>本机</em></strong><span id="selfStatus">在线</span></div>
-              <i class="status-dot online"></i>
-            </article>
-            <article class="member-card">
-              <div class="member-avatar peer">TA</div>
-              <div class="member-copy"><strong>TA</strong><span id="peerStatus">离线</span></div>
-              <i id="peerDot" class="status-dot"></i>
-            </article>
-          </div>
-        </section>
+        <div class="room-sidebar-head">
+          <strong>房间</strong>
+          <span>2 人上限</span>
+        </div>
 
-        <section class="room-section sync-section">
-          <div class="section-heading compact-heading"><h3>同步状态</h3></div>
-          <div class="sync-card">
-            <div class="sync-icon">✓</div>
-            <div><strong id="syncBadge">等待视频</strong><span>控制同步，媒体线路独立</span></div>
-          </div>
-        </section>
+        <div class="room-sidebar-body">
+          <section class="room-section members-section">
+            <div class="section-heading"><h3>房间成员</h3></div>
+            <div class="member-stack">
+              <article class="member-card">
+                <div class="member-avatar self">你</div>
+                <div class="member-copy"><strong>你 <em>本机</em></strong><span id="selfStatus">在线</span></div>
+                <i class="status-dot online"></i>
+              </article>
+              <article class="member-card">
+                <div class="member-avatar peer">TA</div>
+                <div class="member-copy"><strong>TA</strong><span id="peerStatus">离线</span></div>
+                <i id="peerDot" class="status-dot"></i>
+              </article>
+            </div>
+          </section>
 
-        <section class="room-section buffer-section">
-          <div class="section-heading compact-heading"><h3>缓冲状态</h3></div>
-          <div class="buffer-list">
-            <div><span>你</span><b class="signal"><i></i><i></i><i></i><i></i></b><small id="selfBuffering">等待媒体</small></div>
-            <div><span>TA</span><b class="signal"><i></i><i></i><i></i><i></i></b><small id="peerBuffering">等待上线</small></div>
-          </div>
-          <div class="room-actions">
-            <button id="waitBtn" class="primary" type="button">等等我</button>
-            <button id="syncNowBtn" class="outline-button" type="button">重新同步</button>
-          </div>
-        </section>
+          <section class="room-section sync-section">
+            <div class="section-heading"><h3>同步状态</h3></div>
+            <div class="sync-card">
+              <div class="sync-icon">✓</div>
+              <div><strong id="syncBadge">等待视频</strong><span>播放控制已连接</span></div>
+            </div>
+          </section>
 
-        <section class="room-section speed-section">
-          <div class="section-heading compact-heading"><h3>播放速度</h3><span>双方同步</span></div>
-          <label class="speed-select-wrap">
-            <select id="rateSelect" aria-label="播放速度">
-              <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1.0×</option>
-              <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2.0×</option>
-            </select>
-          </label>
-        </section>
+          <section class="room-section buffer-section">
+            <div class="section-heading"><h3>播放状态</h3></div>
+            <div class="buffer-list">
+              <div><span>你</span><b class="signal"><i></i><i></i><i></i><i></i></b><small id="selfBuffering">等待媒体</small></div>
+              <div><span>TA</span><b class="signal"><i></i><i></i><i></i><i></i></b><small id="peerBuffering">等待上线</small></div>
+            </div>
+          </section>
 
-        <section class="room-section activity-section">
-          <div class="section-heading compact-heading"><h3>房间动态</h3><span>实时</span></div>
-          <div class="activity-list">
-            <div><i></i><span>播放 / 暂停 / 拖动会同步给双方</span></div>
-            <div><i></i><span>任意一方缓冲只影响自己的播放器</span></div>
-            <div><i></i><span>需要时可手动执行一次重新同步</span></div>
-          </div>
-          <div class="activity-input"><span>一条时间线，各自独立加载</span><b>→</b></div>
-        </section>
+          <section class="room-section action-section">
+            <div class="room-actions">
+              <button id="waitBtn" class="primary" type="button">等等我</button>
+              <button id="syncNowBtn" class="outline-button" type="button">重新同步</button>
+            </div>
+          </section>
+
+          <section class="room-section speed-section">
+            <div class="section-heading"><h3>播放速度</h3><span>双方同步</span></div>
+            <label class="speed-select-wrap">
+              <select id="rateSelect" aria-label="播放速度">
+                <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1.0×</option>
+                <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2.0×</option>
+              </select>
+            </label>
+          </section>
+        </div>
+
+        <div class="room-sidebar-foot">
+          <span>仅同步控制，不共享缓存</span>
+        </div>
       </aside>
     </main>
   </div>
@@ -165,7 +160,7 @@
     <div id="breadcrumbs" class="breadcrumbs"></div>
     <div class="library-toolbar"><span id="libraryStatus">正在读取...</span><button id="refreshLibraryBtn" type="button">↻ 刷新</button></div>
     <div id="libraryList" class="library-list"></div>
-    <div class="drawer-foot"><span>视频数据直接由 123 CDN → 浏览器</span></div>
+    <div class="drawer-foot"><span>选择视频后自动收起</span></div>
   </aside>
 
   <div id="settingsModal" class="modal-layer hidden" role="dialog" aria-modal="true">
