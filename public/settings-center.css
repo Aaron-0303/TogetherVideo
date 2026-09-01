@@ -1,0 +1,101 @@
+/* TogetherVideo 4.1 — two-column settings center */
+.modal-layer{padding:24px}
+.settings-card.settings-center-card{
+  width:min(960px,calc(100vw - 48px));
+  height:min(660px,calc(100vh - 48px));
+  max-height:none;
+  padding:0;
+  overflow:hidden;
+  display:grid;
+  grid-template-rows:84px minmax(0,1fr);
+  border-radius:16px;
+}
+.settings-center-card .settings-head{
+  min-height:84px;
+  padding:18px 22px;
+  align-items:center;
+  border-bottom:1px solid var(--line);
+  background:var(--surface);
+}
+.settings-center-card .settings-head>div{min-width:0}
+.settings-center-card .settings-head .eyebrow{font-size:10px;letter-spacing:.12em}
+.settings-center-card .settings-head h2{margin:4px 0 3px;font-size:22px;line-height:1.2;letter-spacing:-.02em}
+.settings-center-card .settings-head p{margin:0;font-size:13px;line-height:1.5;color:var(--muted)}
+.settings-center-card .settings-head .round-button{width:36px;height:36px;font-size:22px}
+
+.settings-center-body{min-height:0;display:grid;grid-template-columns:220px minmax(0,1fr)}
+.settings-nav{min-width:0;padding:18px 12px;background:var(--surface-2);border-right:1px solid var(--line);overflow:auto}
+.settings-nav-intro{display:grid;gap:3px;padding:0 10px 14px;margin-bottom:6px;border-bottom:1px solid var(--line)}
+.settings-nav-intro strong{font-size:14px;color:var(--text)}
+.settings-nav-intro span{font-size:11px;color:var(--muted)}
+.settings-nav-list{display:grid;gap:6px;margin-top:10px}
+.settings-nav-item{
+  width:100%;min-height:58px;padding:9px 10px;
+  display:grid;grid-template-columns:36px minmax(0,1fr) 18px;align-items:center;gap:9px;
+  border:1px solid transparent;border-radius:10px;background:transparent;color:var(--text-2);text-align:left;
+  transition:background .16s ease,border-color .16s ease,color .16s ease;
+}
+.settings-nav-item:hover{background:var(--surface);border-color:var(--line);color:var(--text)}
+.settings-nav-item.active{background:var(--surface);border-color:color-mix(in srgb,var(--accent) 28%,var(--line));box-shadow:0 5px 16px rgba(0,0,0,.05);color:var(--text)}
+.settings-nav-icon{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;background:var(--surface-3);border:1px solid var(--line);color:var(--accent);font-size:16px}
+.settings-nav-item.active .settings-nav-icon{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 28%,var(--line))}
+.settings-nav-copy{min-width:0;display:grid;gap:3px}
+.settings-nav-copy strong{font-size:14px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.settings-nav-copy small{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.settings-nav-arrow{font-size:22px;color:var(--muted-2);text-align:center}
+.settings-nav-item.active .settings-nav-arrow{color:var(--accent)}
+
+.settings-content{min-width:0;min-height:0;overflow:auto;padding:26px 30px 24px;background:var(--surface);scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+.settings-center-card .settings-pane{display:none;padding:0;border:0}
+.settings-center-card .settings-pane.active{display:block}
+.settings-center-card .setting-title{grid-template-columns:44px minmax(0,1fr);gap:13px;align-items:center;margin:0 0 24px}
+.settings-center-card .setting-title>span{width:44px;height:44px;border-radius:11px;font-size:18px}
+.settings-center-card .setting-title div{gap:4px}
+.settings-center-card .setting-title strong{font-size:18px;line-height:1.3;letter-spacing:-.01em}
+.settings-center-card .setting-title small{font-size:13px;line-height:1.6;color:var(--muted)}
+
+.settings-center-card .form-grid{gap:16px 14px}
+.settings-center-card .form-grid label,
+.settings-center-card .password-row label{gap:8px;font-size:13px;font-weight:700;color:var(--text-2)}
+.settings-center-card .form-grid input,
+.settings-center-card .password-row input{
+  min-height:44px;padding:10px 12px;border-radius:9px;font-size:14px;font-weight:500;
+}
+.settings-center-card .settings-actions{margin-top:20px;gap:10px}
+.settings-center-card .settings-actions button,
+.settings-center-card .password-row button{min-height:42px;padding:0 16px;font-size:14px;border-radius:8px}
+.settings-center-card .password-row{grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end}
+.settings-center-card .danger-button{background:color-mix(in srgb,var(--danger) 11%,var(--surface));border:1px solid color-mix(in srgb,var(--danger) 36%,var(--line));color:var(--danger);font-weight:750}
+.settings-center-card .danger-button:hover{background:color-mix(in srgb,var(--danger) 16%,var(--surface));border-color:color-mix(in srgb,var(--danger) 52%,var(--line))}
+.settings-pane[data-settings-panel="chat"] .settings-actions{
+  justify-content:flex-start;padding:18px;border-radius:12px;
+  border:1px solid color-mix(in srgb,var(--danger) 18%,var(--line));
+  background:color-mix(in srgb,var(--danger) 5%,var(--surface-2));
+}
+.settings-center-notice{margin-top:18px;min-height:20px;font-size:12px;line-height:1.5}
+
+@media (max-width:760px){
+  .modal-layer{padding:12px}
+  .settings-card.settings-center-card{width:100%;height:min(92vh,760px);grid-template-rows:76px 64px minmax(0,1fr);border-radius:14px}
+  .settings-center-card .settings-head{min-height:76px;padding:14px 16px}
+  .settings-center-card .settings-head h2{font-size:19px}
+  .settings-center-card .settings-head p{font-size:12px}
+  .settings-center-body{display:contents}
+  .settings-nav{grid-row:2;padding:8px;border-right:0;border-bottom:1px solid var(--line);overflow-x:auto;overflow-y:hidden}
+  .settings-nav-intro{display:none}
+  .settings-nav-list{display:flex;gap:7px;margin:0;width:max-content}
+  .settings-nav-item{width:auto;min-width:132px;min-height:46px;grid-template-columns:30px minmax(0,1fr);padding:6px 9px}
+  .settings-nav-icon{width:30px;height:30px;font-size:13px}
+  .settings-nav-copy strong{font-size:13px}
+  .settings-nav-copy small{font-size:10px}
+  .settings-nav-arrow{display:none}
+  .settings-content{grid-row:3;padding:20px 16px}
+  .settings-center-card .setting-title{grid-template-columns:38px minmax(0,1fr);gap:10px;margin-bottom:20px}
+  .settings-center-card .setting-title>span{width:38px;height:38px;font-size:15px}
+  .settings-center-card .setting-title strong{font-size:16px}
+  .settings-center-card .setting-title small{font-size:12px}
+  .settings-center-card .form-grid{grid-template-columns:1fr;gap:13px}
+  .settings-center-card .form-grid .full{grid-column:auto}
+  .settings-center-card .password-row{grid-template-columns:1fr}
+  .settings-center-card .password-row button{width:100%}
+}
